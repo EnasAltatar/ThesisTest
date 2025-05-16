@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import os
+import json
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 st.set_page_config(page_title="AI vs Human Chemotherapy Evaluation", layout="wide")
 
@@ -169,47 +172,34 @@ if st.button("Submit Evaluation"):
         "Evaluator Comments": comments
     }
 
-    import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+    # Set up Google Sheets authorization
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds_dict = json.loads(st.secrets["GOOGLE_APPLICATION_CREDENTIALS"])
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
 
-# Connect to Google Sheet
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-#creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+    # Open and append to the sheet
+    sheet = client.open("evaluations_log").sheet1
+    sheet.append_row([
+        str(result["Timestamp"]),
+        result["Evaluator ID"],
+        result["Case ID"],
+        result["Cancer Type"],
+        result["Regimen"],
+        result["Complexity"],
+        result["Recommendation"],
+        result["PCNE_Problem"],
+        result["PCNE_Cause"],
+        result["PCNE_Intervention"],
+        result["PCNE_Outcome"],
+        result["PCNE_Severity"],
+        result["Stanford_Clinical Accuracy"],
+        result["Stanford_Clinical Appropriateness"],
+        result["Stanford_Safety Considerations"],
+        result["Stanford_Clarity of Rationale"],
+        result["Stanford_Completeness"],
+        result["Stanford_Institutional Compliance"],
+        result["Evaluator Comments"]
+    ])
 
-import json
-import streamlit as st
-
-from oauth2client.service_account import ServiceAccountCredentials
-
-# Load credentials from Streamlit secrets
-creds_dict = json.loads(st.secrets["GOOGLE_APPLICATION_CREDENTIALS"])
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-client = gspread.authorize(creds)
-
-# Open your Google Sheet
-sheet = client.open("evaluations_log").sheet1
-
-# Append the result row
-sheet.append_row([
-    str(result["Timestamp"]),
-    result["Evaluator ID"],
-    result["Case ID"],
-    result["Cancer Type"],
-    result["Regimen"],
-    result["Complexity"],
-    result["Recommendation"],
-    result["PCNE_Problem"],
-    result["PCNE_Cause"],
-    result["PCNE_Intervention"],
-    result["PCNE_Outcome"],
-    result["PCNE_Severity"],
-    result["Stanford_Clinical Accuracy"],
-    result["Stanford_Clinical Appropriateness"],
-    result["Stanford_Safety Considerations"],
-    result["Stanford_Clarity of Rationale"],
-    result["Stanford_Completeness"],
-    result["Stanford_Institutional Compliance"],
-    result["Evaluator Comments"]
-])
-
-st.success("Evaluation submitted and saved to Google Sheets! ✅")
+    st.success("Evaluation submitted and saved to Google Sheets! ✅")
