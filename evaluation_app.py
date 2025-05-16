@@ -172,14 +172,17 @@ if st.button("Submit Evaluation"):
         "Evaluator Comments": comments
     }
 
-    # Set up Google Sheets authorization
+    # Connect to Google Sheet using URL for better reliability
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(st.secrets["GOOGLE_APPLICATION_CREDENTIALS"])
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
 
-    # Open and append to the sheet
-    sheet = client.open("evaluations_log").sheet1
+    # Open sheet by URL instead of title (safer)
+    sheet_url = "https://docs.google.com/spreadsheets/d/1MsXao47OMA715hwvpDhHoAimcEYJtjrqbK7Ed9wXw0c"
+    sheet = client.open_by_url(sheet_url).sheet1
+
+    # Append the row
     sheet.append_row([
         str(result["Timestamp"]),
         result["Evaluator ID"],
