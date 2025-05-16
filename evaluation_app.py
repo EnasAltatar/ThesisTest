@@ -169,6 +169,38 @@ if st.button("Submit Evaluation"):
         "Evaluator Comments": comments
     }
 
-    df = pd.DataFrame([result])
-    df.to_csv("evaluations_log.csv", mode='a', header=not os.path.exists("evaluations_log.csv"), index=False)
-    st.success("Evaluation submitted successfully! ✅")
+    import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+# Connect to Google Sheet
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+client = gspread.authorize(creds)
+
+# Open your Google Sheet
+sheet = client.open("evaluations_log").sheet1
+
+# Append the result row
+sheet.append_row([
+    str(result["Timestamp"]),
+    result["Evaluator ID"],
+    result["Case ID"],
+    result["Cancer Type"],
+    result["Regimen"],
+    result["Complexity"],
+    result["Recommendation"],
+    result["PCNE_Problem"],
+    result["PCNE_Cause"],
+    result["PCNE_Intervention"],
+    result["PCNE_Outcome"],
+    result["PCNE_Severity"],
+    result["Stanford_Clinical Accuracy"],
+    result["Stanford_Clinical Appropriateness"],
+    result["Stanford_Safety Considerations"],
+    result["Stanford_Clarity of Rationale"],
+    result["Stanford_Completeness"],
+    result["Stanford_Institutional Compliance"],
+    result["Evaluator Comments"]
+])
+
+st.success("Evaluation submitted and saved to Google Sheets! ✅")
