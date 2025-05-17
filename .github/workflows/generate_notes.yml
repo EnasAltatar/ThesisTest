@@ -21,4 +21,10 @@ jobs:
           pip install openai anthropic google-generativeai gspread oauth2client pandas python-dotenv
 
       - name: Run AI generation script
-        run: python scripts/generate_ai_notes.py
+  env:
+    GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+    GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  run: python scripts/generate_ai_notes.py
+
