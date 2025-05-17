@@ -5,8 +5,20 @@ import os
 import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from io import BytesIO
+import base64
 
 st.set_page_config(page_title="AI vs Human Chemotherapy Evaluation", layout="wide")
+
+# ------------------
+# Function: Convert DF to Excel for Download
+# ------------------
+def convert_df_to_excel(df):
+    output = BytesIO()
+    writer = pd.ExcelWriter(output, engine='xlsxwriter')
+    df.to_excel(writer, index=False, sheet_name='Evaluation Report')
+    writer.save()
+    return output.getvalue()
 
 # ------------------
 # Introduction Section
@@ -47,6 +59,7 @@ This platform is part of an academic research project evaluating the clinical qu
 # ------------------
 st.sidebar.header("Evaluator Details")
 evaluator_id = st.sidebar.text_input("Evaluator ID")
+is_admin = evaluator_id.lower().strip() == "admin"
 st.sidebar.markdown("---")
 
 # ------------------
@@ -61,6 +74,34 @@ sheet = client.open_by_url(sheet_url).sheet1
 records = sheet.get_all_records()
 evaluated_df = pd.DataFrame(records)
 evaluated_cases = evaluated_df["Case ID"].unique().tolist() if not evaluated_df.empty else []
+
+# ------------------
+# Admin Dashboard View
+# ------------------
+if is_admin:
+    st.markdown('<div class="section-title">📊 Admin Dashboard</div>', unsafe_allow_html=True)
+    st.write("### Summary of Evaluated Cases")
+    st.write(f"Total Evaluations: {len(evaluated_df)}")
+    st.write("Breakdown by Evaluator:")
+    st.dataframe(evaluated_df.groupby("Evaluator ID")["Case ID"].count().reset_index(name="Evaluated Cases"))
+
+    if "Complexity" in evaluated_df.columns:
+        st.write("Breakdown by Complexity:")
+        st.dataframe(evaluated_df["Complexity"].value_counts().reset_index().rename(columns={"index": "Complexity", "Complexity": "Count"}))
+
+    st.write("Unassigned Cases:")
+    if os.path.exists("cases.csv"):
+        all_cases = pd.read_csv("cases.csv")
+        unassigned_cases = all_cases[~all_cases["Case ID"].isin(evaluated_cases)]
+        st.dataframe(unassigned_cases)
+
+    if st.button("📥 Export Evaluation Report to Excel"):
+        excel_data = convert_df_to_excel(evaluated_df)
+        b64 = base64.b64encode(excel_data).decode()
+        href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="evaluation_report.xlsx">Download Excel File</a>'
+        st.markdown(href, unsafe_allow_html=True)
+
+    st.stop()
 
 # ------------------
 # Load Available Cases
@@ -168,6 +209,12 @@ for field in rubric_fields:
     rubric_scores[field] = st.slider(field, 1, 5, 3)
 
 # ------------------
+# Component 3: Evaluator Feedback (Optional)
+# ------------------
+st.markdown('<div class="section-title">Component 3: Evaluator Feedback</div>', unsafe_allow_html=True)
+evaluator_feedback = st.text_area("Was this case realistic / relevant / clear? (Optional)")
+
+# ------------------
 # Comments and Submission
 # ------------------
 st.subheader("Evaluator Comments")
@@ -188,7 +235,8 @@ if st.button("Submit Evaluation"):
         "PCNE_Outcome": outcome_code,
         "PCNE_Severity": severity,
         **{f"Stanford_{field}": rubric_scores[field] for field in rubric_fields},
-        "Evaluator Comments": comments
+        "Evaluator Comments": comments,
+        "Evaluator Feedback": evaluator_feedback
     }
 
     sheet.append_row([
@@ -210,7 +258,8 @@ if st.button("Submit Evaluation"):
         result["Stanford_Clarity of Rationale"],
         result["Stanford_Completeness"],
         result["Stanford_Institutional Compliance"],
-        result["Evaluator Comments"]
+        result["Evaluator Comments"],
+        result["Evaluator Feedback"]
     ])
 
     st.success("Evaluation submitted and saved to Google Sheets! ✅")
