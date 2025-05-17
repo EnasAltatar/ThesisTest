@@ -43,27 +43,34 @@ This platform is part of an academic research project evaluating the clinical qu
 """)
 
 # ------------------
+# Evaluator Info Sidebar
+# ------------------
+st.sidebar.header("Evaluator Details")
+evaluator_id = st.sidebar.text_input("Evaluator ID")
+st.sidebar.markdown("---")
+
+# ------------------
+# Connect to Google Sheet and Load Evaluated Case IDs
+# ------------------
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds_dict = json.loads(st.secrets["GOOGLE_APPLICATION_CREDENTIALS"])
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+client = gspread.authorize(creds)
+sheet_url = "https://docs.google.com/spreadsheets/d/1MsXao47OMA715hwvpDhHoAimcEYJtjrqbK7Ed9wXw0c"
+sheet = client.open_by_url(sheet_url).sheet1
+records = sheet.get_all_records()
+evaluated_df = pd.DataFrame(records)
+evaluated_cases = evaluated_df["Case ID"].unique().tolist() if not evaluated_df.empty else []
+
+# ------------------
 # Load Available Cases
 # ------------------
 if os.path.exists("cases.csv"):
     all_cases = pd.read_csv("cases.csv")
 else:
-    all_cases = pd.DataFrame(columns=["Case ID", "Diagnosis", "Regimen", "Complexity"])
-
-if os.path.exists("evaluations_log.csv"):
-    evaluated = pd.read_csv("evaluations_log.csv")
-    evaluated_cases = evaluated["Case ID"].unique().tolist()
-else:
-    evaluated_cases = []
+    all_cases = pd.DataFrame(columns=["Case ID", "Medications", "Dosages", "Lab Tests", "Notes"])
 
 available_cases = all_cases[~all_cases["Case ID"].isin(evaluated_cases)]
-
-# ------------------
-# Sidebar: Evaluator Info
-# ------------------
-st.sidebar.header("Evaluator Details")
-evaluator_id = st.sidebar.text_input("Evaluator ID")
-st.sidebar.markdown("---")
 
 # ------------------
 # Component 0: Case Selection
@@ -73,9 +80,21 @@ st.markdown('<div class="section-title">Component 0: Select Case</div>', unsafe_
 if not available_cases.empty:
     selected_case = st.selectbox("Select Case ID", available_cases["Case ID"])
     selected_data = available_cases[available_cases["Case ID"] == selected_case].iloc[0]
-    cancer_type = selected_data["Diagnosis"]
-    regimen = selected_data["Regimen"]
-    complexity = selected_data["Complexity"]
+
+    st.markdown(f"**Medications:** {selected_data.get('Medications', '')}")
+    st.markdown(f"**Dosages:** {selected_data.get('Dosages', '')}")
+    st.markdown(f"**Lab Tests:** {selected_data.get('Lab Tests', '')}")
+    st.markdown(f"**Pharmacist Notes:** {selected_data.get('Notes', '')}")
+
+    cancer_type = st.selectbox("Select Diagnosis", [
+        "Breast Cancer", "Lung Cancer", "Colorectal Cancer", "Lymphoma", "Gastric Cancer", "Other"
+    ])
+
+    regimen = st.text_input("Enter Regimen Name")
+
+    complexity = st.selectbox("Select Case Complexity", [
+        "Simple", "Intermediate", "Complex"
+    ])
 else:
     st.warning("All cases have been evaluated. No available cases remain.")
     st.stop()
@@ -172,17 +191,6 @@ if st.button("Submit Evaluation"):
         "Evaluator Comments": comments
     }
 
-    # Connect to Google Sheet using URL for better reliability
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds_dict = json.loads(st.secrets["GOOGLE_APPLICATION_CREDENTIALS"])
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    client = gspread.authorize(creds)
-
-    # Open sheet by URL instead of title (safer)
-    sheet_url = "https://docs.google.com/spreadsheets/d/1MsXao47OMA715hwvpDhHoAimcEYJtjrqbK7Ed9wXw0c"
-    sheet = client.open_by_url(sheet_url).sheet1
-
-    # Append the row
     sheet.append_row([
         str(result["Timestamp"]),
         result["Evaluator ID"],
