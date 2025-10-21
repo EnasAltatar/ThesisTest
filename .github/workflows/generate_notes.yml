@@ -21,9 +21,10 @@ jobs:
 
       # Input/output config
       INPUT_EXCEL: synthetic_breast_cancer_1000.xlsx
+      SHEET_NAME: Sheet1        # ✅ specify the correct Excel sheet
       OUT_DIR: outputs
       SOURCES: gpt,claude,deepseek,cadss
-      ROW_LIMIT: 5  # test run; increase later
+      ROW_LIMIT: 5              # test with 5 cases first, increase later
 
     steps:
       - name: Checkout repository
@@ -43,13 +44,13 @@ jobs:
           echo ">>> Installed packages:"
           pip list | grep -E "pandas|openpyxl"
 
-     - name: Check Excel sheet names
-       run: |
-         python - << 'PY'
-         import openpyxl
-         wb = openpyxl.load_workbook("synthetic_breast_cancer_1000.xlsx", read_only=True)
-         print("Sheet names:", wb.sheetnames)
-         PY
+      - name: Check Excel sheet names
+        run: |
+          python - << 'PY'
+          import openpyxl
+          wb = openpyxl.load_workbook("synthetic_breast_cancer_1000.xlsx", read_only=True)
+          print("Sheet names:", wb.sheetnames)
+          PY
 
       - name: Run generator
         run: |
