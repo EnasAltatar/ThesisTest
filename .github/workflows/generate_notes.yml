@@ -1,29 +1,44 @@
 name: Run AI Note Generation
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # run manually from the Actions tab
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
+    env:
+      # inject your secrets safely
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}   # your secret is named CLAUDE_API_KEY
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+      # input/output (kept in repo; no secrets here)
+      INPUT_EXCEL: synthetic_breast_cancer_1000.xlsx
+      OUT_DIR: outputs
+      SOURCES: gpt,claude,deepseek,cadss
+
+      # TEMP: run only first 5 rows to smoke-test
+      ROW_LIMIT: 5
+
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install openai==0.28 anthropic google-generativeai gspread oauth2client pandas python-dotenv
+          pip install -r requirements.txt
 
-      - name: Run AI generation script
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      - name: Run generator
         run: python scripts/generate_ai_notes.py
+
+      - name: Upload output CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-recommendations
+          path: outputs/AI_Recommendations.csv
