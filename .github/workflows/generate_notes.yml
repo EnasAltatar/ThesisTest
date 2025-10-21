@@ -43,6 +43,14 @@ jobs:
           echo ">>> Installed packages:"
           pip list | grep -E "pandas|openpyxl"
 
+     - name: Check Excel sheet names
+       run: |
+         python - << 'PY'
+         import openpyxl
+         wb = openpyxl.load_workbook("synthetic_breast_cancer_1000.xlsx", read_only=True)
+         print("Sheet names:", wb.sheetnames)
+         PY
+
       - name: Run generator
         run: |
           echo ">>> Running AI note generator..."
