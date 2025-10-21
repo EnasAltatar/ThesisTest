@@ -52,6 +52,10 @@ jobs:
           print("Sheet names:", wb.sheetnames)
           PY
 
+      - name: Show script header (debug)
+        run: |
+          sed -n '1,120p' scripts/generate_ai_notes.py
+
       - name: Run generator
         run: |
           echo ">>> Running AI note generator..."
