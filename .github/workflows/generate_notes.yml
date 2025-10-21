@@ -1,47 +1,33 @@
 name: Run AI Note Generation
 
 on:
-  workflow_dispatch:  # run manually from the Actions tab
+  workflow_dispatch:  # allows manual run
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
 
-    # ---- Environment (secrets + config) ----
     env:
-      # API keys from your repo Secrets
+      # API Keys from repo secrets
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
-      # Model choices (safe defaults)
+      # Model settings
       GPT_MODEL: gpt-4o-mini
       CLAUDE_MODEL: claude-3-5-sonnet-20240620
       DEEPSEEK_MODEL: deepseek-chat
       DEEPSEEK_R: deepseek-reasoner
 
-      # I/O config
+      # Input/output config
       INPUT_EXCEL: synthetic_breast_cancer_1000.xlsx
       OUT_DIR: outputs
-
-      # Which sources to generate (include GPT/Claude/DeepSeek + CADSS)
       SOURCES: gpt,claude,deepseek,cadss
-
-      # First run a tiny sample to save cost; remove later for full run
-      ROW_LIMIT: 5
+      ROW_LIMIT: 5  # test run; increase later
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Show repo tree
-        run: |
-          echo "::group::Repo root"
-          ls -la
-          echo "::endgroup::"
-          echo "::group::scripts/"
-          ls -la scripts
-          echo "::endgroup::"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -50,22 +36,21 @@ jobs:
 
       - name: Install dependencies
         run: |
+          echo ">>> Installing dependencies..."
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          # Ensure Excel reading works
-          pip install "openpyxl>=3.1.2"
-          python - << 'PY'
-import sys, pandas, openpyxl
-print("Python:", sys.version)
-print("pandas:", pandas.__version__)
-print("openpyxl:", openpyxl.__version__)
-PY
+          pip install -r requirements.txt || true
+          pip install pandas openpyxl
+          echo ">>> Installed packages:"
+          pip list | grep -E "pandas|openpyxl"
 
-      - name: Run generator (5 rows)
-        run: python scripts/generate_ai_notes.py
+      - name: Run generator
+        run: |
+          echo ">>> Running AI note generator..."
+          python scripts/generate_ai_notes.py
+          echo ">>> Generator completed successfully"
 
-      - name: Upload output CSV
+      - name: Upload generated outputs
         uses: actions/upload-artifact@v4
         with:
-          name: ai-recommendations
-          path: outputs/AI_Recommendations.csv
+          name: ai_outputs
+          path: outputs/
