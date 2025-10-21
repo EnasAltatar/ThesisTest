@@ -1,28 +1,36 @@
 name: Run AI Note Generation
 
 on:
-  workflow_dispatch:  # run manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
     env:
-      # inject your secrets safely
+      # map your repo secrets to env vars the scripts expect
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}   # your secret is named CLAUDE_API_KEY
+      ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
-      # input/output (kept in repo; no secrets here)
+      # models + io
+      GPT_MODEL: gpt-4o-mini
+      CLAUDE_MODEL: claude-3-5-sonnet-20240620
+      DEEPSEEK_MODEL: deepseek-chat
+      DEEPSEEK_R: deepseek-reasoner
+
       INPUT_EXCEL: synthetic_breast_cancer_1000.xlsx
       OUT_DIR: outputs
       SOURCES: gpt,claude,deepseek,cadss
 
-      # TEMP: run only first 5 rows to smoke-test
+      # small test first
       ROW_LIMIT: 5
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Show repo tree
+        run: ls -la && echo && ls -la scripts
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,8 +41,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          python -c "import sys,openai,anthropic,httpx,pandas; print('Versions:', sys.version); print('openai',openai.__version__); import anthropic as a; print('anthropic', a.__version__)"
 
-      - name: Run generator
+      - name: Test connections to models
+        run: python scripts/test_connections.py
+
+      - name: Run generator (5 rows)
         run: python scripts/generate_ai_notes.py
 
       - name: Upload output CSV
