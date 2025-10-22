@@ -1,4 +1,4 @@
-name: Run AI Note Generation
+name: Run AI Note Generation (Full Dataset)
 
 on:
   workflow_dispatch:  # allows manual run
@@ -29,12 +29,12 @@ jobs:
       INPUT_SHEET: Sheet1
       OUT_DIR: outputs
       SOURCES: gpt,claude,deepseek,cadss
-      ROW_LIMIT: 5          # test run; increase later (e.g., 50, then 1500)
-      PER_CASE_SLEEP: 0.2   # small pacing to reduce rate-limit errors
+      ROW_LIMIT: 1500          # full dataset run
+      PER_CASE_SLEEP: 0.5      # slight delay to avoid rate limits
 
-      # Temperatures (can tune per stage)
+      # Temperatures (stable but diverse output)
       GEN_TEMPERATURE: "0.2"
-      REV_TEMPERATURE: "0.4"
+      REV_TEMPERATURE: "0.3"
       SYN_TEMPERATURE: "0.2"
 
     steps:
@@ -50,14 +50,14 @@ jobs:
         run: |
           echo ">>> Installing dependencies..."
           python -m pip install --upgrade pip
-          # If you have a requirements.txt, try it first (non-fatal if missing)
+          # Try your requirements file first if present
           pip install -r requirements.txt || true
-          # Ensure required libs are present
+          # Ensure required libraries are available
           pip install openai anthropic httpx pandas openpyxl python-dotenv tenacity
           echo ">>> Installed packages:"
           pip list | grep -E "openai|anthropic|httpx|pandas|openpyxl|tenacity|python-dotenv"
 
-      # (Optional) sanity check: list Excel sheet names
+      # Optional: verify Excel file + sheet names
       - name: Check Excel sheet names
         run: |
           python - << 'PY'
@@ -66,6 +66,7 @@ jobs:
           print("Sheet names:", wb.sheetnames)
           PY
 
+      # === Main AI Note Generation ===
       - name: Run generator
         run: |
           echo ">>> Running AI note generator..."
@@ -74,13 +75,14 @@ jobs:
           echo ">>> Listing outputs directory"
           ls -la "$OUT_DIR" || true
 
+      # Upload the raw generated output folder
       - name: Upload generated outputs (raw)
         uses: actions/upload-artifact@v4
         with:
           name: ai_outputs
           path: outputs/
 
-      # Prepare cleanup input to match your cleanup script's current filename
+      # Prepare cleanup input
       - name: Prepare cleanup input
         run: |
           if [ -f "outputs/AI_Recommendations.csv" ]; then
@@ -91,16 +93,18 @@ jobs:
             exit 1
           fi
 
+      # === Data Cleanup for Human Evaluation ===
       - name: Run cleanup script
         run: |
-          echo ">>> Running cleanup..."
+          echo ">>> Running cleanup script..."
           python scripts/cleanup_ai_recommendations.py
           echo ">>> Cleanup finished."
-          # Move the cleaned file into outputs for convenience
           mkdir -p outputs
           mv -f "AI_RECOMMENDATIONS_CLEAN.csv" "outputs/AI_RECOMMENDATIONS_CLEAN.csv" || true
+          echo ">>> Listing cleaned outputs:"
           ls -la outputs || true
 
+      # Upload cleaned organized output
       - name: Upload cleaned CSV
         uses: actions/upload-artifact@v4
         with:
