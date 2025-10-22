@@ -7,13 +7,13 @@ import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 from dotenv import load_dotenv
 
-# -----------------------------
-# Load env / config
-# -----------------------------
+# =============================
+# Load env / global config
+# =============================
 load_dotenv()
 
 INPUT_EXCEL = os.getenv("INPUT_EXCEL", "synthetic_breast_cancer_1000.xlsx")
-SHEET_NAME  = os.getenv("SHEET_NAME", "").strip()      # <-- matches workflow env
+SHEET_NAME  = os.getenv("SHEET_NAME", "").strip()  # <-- matches workflow env
 OUT_DIR     = Path(os.getenv("OUT_DIR", "outputs"))
 OUT_FILE    = OUT_DIR / "AI_Recommendations.csv"
 
@@ -27,11 +27,11 @@ GEN_TEMPERATURE = float(os.getenv("GEN_TEMPERATURE", "0.2"))
 REV_TEMPERATURE = float(os.getenv("REV_TEMPERATURE", "0.4"))
 SYN_TEMPERATURE = float(os.getenv("SYN_TEMPERATURE", "0.2"))
 
-ROW_LIMIT = int(os.getenv("ROW_LIMIT", "0"))  # 0 => no limit
+ROW_LIMIT = int(os.getenv("ROW_LIMIT", "0"))  # 0 => no cap (use small value in CI test runs)
 
-# -----------------------------
-# Model adapters
-# -----------------------------
+# =============================
+# Model clients / adapters
+# =============================
 # OpenAI (GPT)
 from openai import OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -42,7 +42,7 @@ import anthropic
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ac = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
-# DeepSeek (OpenAI-compatible chat endpoint)
+# DeepSeek (OpenAI-compatible REST)
 import httpx
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE = os.getenv("DEEPSEEK_BASE", "https://api.deepseek.com")
@@ -53,9 +53,9 @@ CLAUDE_MODEL   = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20240620")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_R     = os.getenv("DEEPSEEK_R", "deepseek-reasoner")
 
-# -----------------------------
+# =============================
 # Prompt builders
-# -----------------------------
+# =============================
 def build_case_prompt(row: pd.Series) -> str:
     return f"""You are a clinical oncology pharmacist at a tertiary cancer center.
 
@@ -115,9 +115,9 @@ Instructions:
 - Do NOT include model names or JSON; return final note as clean text only.
 """
 
-# -----------------------------
+# =============================
 # API callers (with retry)
-# -----------------------------
+# =============================
 @retry(stop=stop_after_attempt(3), wait=wait_exponential_jitter(1, 4))
 def call_gpt_text(prompt: str, temperature: float = 0.2) -> str:
     if not oai:
@@ -153,9 +153,9 @@ def call_deepseek_text(prompt: str, model: str, temperature: float = 0.2) -> str
         data = r.json()
         return data["choices"][0]["message"]["content"].strip()
 
-# -----------------------------
+# =============================
 # Minimal safety checks (stub)
-# -----------------------------
+# =============================
 def _to_float(x, default=None):
     try:
         return float(x)
@@ -171,9 +171,9 @@ def safety_gate(note: str, row: pd.Series) -> tuple[bool, str]:
         red_flags.append("Suspicious dose language.")
     return (len(red_flags) == 0), "; ".join(red_flags)
 
-# -----------------------------
+# =============================
 # CADSS orchestration
-# -----------------------------
+# =============================
 def cadss_flow(case_prompt: str) -> str:
     g_note   = call_gpt_text(case_prompt, temperature=GEN_TEMPERATURE)
     critique = call_deepseek_text(build_review_prompt(case_prompt, g_note),
@@ -182,9 +182,9 @@ def cadss_flow(case_prompt: str) -> str:
                                 temperature=SYN_TEMPERATURE)
     return final
 
-# -----------------------------
+# =============================
 # Data loading (robust sheet handling)
-# -----------------------------
+# =============================
 def load_dataframe() -> pd.DataFrame:
     if INPUT_EXCEL.lower().endswith(".xlsx"):
         loaded = pd.read_excel(INPUT_EXCEL, sheet_name=SHEET_NAME if SHEET_NAME else None)
@@ -202,13 +202,20 @@ def load_dataframe() -> pd.DataFrame:
 
     return df
 
-# -----------------------------
+# =============================
 # Main
-# -----------------------------
+# =============================
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     df = load_dataframe()
     print(f"[info] Loaded {len(df)} rows; columns: {list(df.columns)}")
+
+    # --- HOT PATCH: normalize df if a dict somehow slipped through ---
+    if isinstance(df, dict):
+        key = SHEET_NAME if (SHEET_NAME and SHEET_NAME in df) else next(iter(df))
+        print(f"[info] HOT-PATCH selected sheet: {key}")
+        df = df[key]
+    # -----------------------------------------------------------------
 
     records = []
     for i, row in df.iterrows():
