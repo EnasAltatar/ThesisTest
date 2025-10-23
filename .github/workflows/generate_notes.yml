@@ -1,11 +1,12 @@
-name: Run AI Note Generation (Full Dataset)
+name: Run AI Note Generation (First 500)
 
 on:
-  workflow_dispatch:  # allows manual run
+  workflow_dispatch:  # manual run
 
 jobs:
-  run-script:
+  run-500:
     runs-on: ubuntu-latest
+    timeout-minutes: 360  # max allowed
 
     env:
       # === API Keys (from repo Secrets) ===
@@ -15,11 +16,12 @@ jobs:
 
       # === Models & Roles ===
       GPT_MODEL: gpt-4o-mini
-      CLAUDE_MODEL: claude-3-5-sonnet-20240620
+      # Use rolling alias to avoid deprecation warnings
+      CLAUDE_MODEL: claude-3-5-sonnet-latest
       DEEPSEEK_MODEL: deepseek-chat
       DEEPSEEK_R: deepseek-reasoner
 
-      # CADSS role routing (you can A/B these without code changes)
+      # CADSS role routing (easy to A/B without code changes)
       CADSS_GENERATOR: gpt       # gpt | claude | deepseek
       CADSS_REVIEWER: deepseek   # gpt | claude | deepseek
       CADSS_SYNTH: claude        # claude | gpt | deepseek
@@ -29,13 +31,19 @@ jobs:
       INPUT_SHEET: Sheet1
       OUT_DIR: outputs
       SOURCES: gpt,claude,deepseek,cadss
-      ROW_LIMIT: 1500          # full dataset run
-      PER_CASE_SLEEP: 0.5      # slight delay to avoid rate limits
 
-      # Temperatures (stable but diverse output)
+      # === Run just the first 500 rows ===
+      START_ROW: 0
+      ROW_LIMIT: 500
+      PER_CASE_SLEEP: 0.5
+
+      # Temperatures (stable but not flat)
       GEN_TEMPERATURE: "0.2"
       REV_TEMPERATURE: "0.3"
       SYN_TEMPERATURE: "0.2"
+
+      # Safe resume: skip cases already present in outputs/AI_Recommendations.csv
+      SKIP_COMPLETED: "true"
 
     steps:
       - name: Checkout repository
@@ -50,14 +58,11 @@ jobs:
         run: |
           echo ">>> Installing dependencies..."
           python -m pip install --upgrade pip
-          # Try your requirements file first if present
           pip install -r requirements.txt || true
-          # Ensure required libraries are available
           pip install openai anthropic httpx pandas openpyxl python-dotenv tenacity
           echo ">>> Installed packages:"
           pip list | grep -E "openai|anthropic|httpx|pandas|openpyxl|tenacity|python-dotenv"
 
-      # Optional: verify Excel file + sheet names
       - name: Check Excel sheet names
         run: |
           python - << 'PY'
@@ -66,47 +71,41 @@ jobs:
           print("Sheet names:", wb.sheetnames)
           PY
 
-      # === Main AI Note Generation ===
-      - name: Run generator
+      - name: Run generator (first 500)
         run: |
-          echo ">>> Running AI note generator..."
+          echo ">>> Running generator for rows $START_ROW..$((START_ROW+ROW_LIMIT-1))"
           python scripts/generate_ai_notes.py
-          echo ">>> Generator completed successfully"
-          echo ">>> Listing outputs directory"
+          echo ">>> Generator completed."
+          echo ">>> Listing outputs/"
           ls -la "$OUT_DIR" || true
 
-      # Upload the raw generated output folder
       - name: Upload generated outputs (raw)
         uses: actions/upload-artifact@v4
         with:
-          name: ai_outputs
+          name: ai_outputs_0_499
           path: outputs/
 
-      # Prepare cleanup input
       - name: Prepare cleanup input
         run: |
           if [ -f "outputs/AI_Recommendations.csv" ]; then
             cp "outputs/AI_Recommendations.csv" "AI RECOMMENDATIONS.csv"
           else
-            echo "WARNING: outputs/AI_Recommendations.csv not found. Listing files for debug:"
+            echo "WARNING: outputs/AI_Recommendations.csv not found. Listing files:"
             ls -la outputs || true
             exit 1
           fi
 
-      # === Data Cleanup for Human Evaluation ===
       - name: Run cleanup script
         run: |
-          echo ">>> Running cleanup script..."
+          echo ">>> Running cleanup..."
           python scripts/cleanup_ai_recommendations.py
           echo ">>> Cleanup finished."
           mkdir -p outputs
-          mv -f "AI_RECOMMENDATIONS_CLEAN.csv" "outputs/AI_RECOMMENDATIONS_CLEAN.csv" || true
-          echo ">>> Listing cleaned outputs:"
+          mv -f "AI_RECOMMENDATIONS_CLEAN.csv" "outputs/AI_RECOMMENDATIONS_CLEAN_0_499.csv" || true
           ls -la outputs || true
 
-      # Upload cleaned organized output
       - name: Upload cleaned CSV
         uses: actions/upload-artifact@v4
         with:
-          name: ai_outputs_clean
-          path: outputs/AI_RECOMMENDATIONS_CLEAN.csv
+          name: ai_outputs_clean_0_499
+          path: outputs/AI_RECOMMENDATIONS_CLEAN_0_499.csv
