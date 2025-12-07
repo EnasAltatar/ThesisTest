@@ -1,14 +1,14 @@
 name: Preprocess KHCC data
 
 on:
-  workflow_dispatch:  # run manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
   preprocess:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -21,19 +21,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas openpyxl
 
-            - name: Run preprocessing script
+      - name: Run preprocessing script
         run: |
           python << 'EOF'
           import pandas as pd
           import re
+          from pathlib import Path
+
+          print("Current directory:", Path(".").absolute())
+          print("Files:", list(Path(".").glob("*")))
 
           # 1) Load original file
-          df = pd.read_excel("merged_labs_pharmacy.xlsx")
+          input_path = Path("merged_labs_pharmacy.xlsx")
+          if not input_path.exists():
+              raise FileNotFoundError(f"{input_path} not found in repo root.")
+
+          df = pd.read_excel(input_path)
 
           # 2) Keep only rows with non-empty notes
           df = df[df["Note"].notna() & (df["Note"].astype(str).str.strip() != "")]
 
-          # 3) (Optional) keep only rows with clinical recommendations = Yes
+          # 3) Keep only clinical recommendations = YES (if column exists)
           if "Has_Clinical_Recommendation" in df.columns:
               df = df[df["Has_Clinical_Recommendation"].astype(str).str.upper() == "YES"]
 
@@ -43,17 +51,16 @@ jobs:
               if col in df.columns:
                   df[col] = pd.to_datetime(df[col], errors="coerce")
 
-          # Recalculate date_diff_days if both dates exist
           if "DATE/TIME SPECIMEN TAKEN" in df.columns and "DATE REPORT COMPLETED" in df.columns:
               df["date_diff_days"] = (
                   df["DATE REPORT COMPLETED"] - df["DATE/TIME SPECIMEN TAKEN"]
               ).dt.days
 
-          # 5) Clean the clinical pharmacist note text
+          # 5) Clean text
           def clean_text(text: str) -> str:
               text = str(text)
               text = text.replace("\r", " ").replace("\n", " ")
-              text = re.sub(r"\s+", " ", text)  # collapse multiple spaces
+              text = re.sub(r"\s+", " ", text)
               return text.strip()
 
           df["note_clean"] = df["Note"].apply(clean_text)
@@ -62,7 +69,7 @@ jobs:
           df["note_len_chars"] = df["note_clean"].str.len()
           df["note_len_words"] = df["note_clean"].str.split().str.len()
 
-          # 7) Very simple keyword flags
+          # 7) Simple keyword flags
           def contains(pattern, text):
               return bool(re.search(pattern, str(text), flags=re.IGNORECASE))
 
@@ -79,11 +86,11 @@ jobs:
               lambda x: contains(r"monitor|follow[- ]?up|recheck|repeat", x)
           )
 
-          # 8) Save preprocessed file
-          df.to_excel("khcc_preprocessed.xlsx", index=False)
-          print("Saved khcc_preprocessed.xlsx with", len(df), "rows and", len(df.columns), "columns.")
+          # 8) Save result
+          output_path = Path("khcc_preprocessed.xlsx")
+          df.to_excel(output_path, index=False)
+          print(f"Saved {output_path} with {len(df)} rows and {len(df.columns)} columns.")
           EOF
-
 
       - name: Upload preprocessed file
         uses: actions/upload-artifact@v4
