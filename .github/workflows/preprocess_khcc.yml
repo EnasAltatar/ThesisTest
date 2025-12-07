@@ -1,2 +1,44 @@
-.github/workflows/preprocess_khcc.yml
+name: Preprocess KHCC data
 
+on:
+  workflow_dispatch:  # run manually from the Actions tab
+
+jobs:
+  preprocess:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas openpyxl
+
+      - name: Run preprocessing script
+        run: |
+          python << 'EOF'
+          import pandas as pd
+
+          # 1) Load your Excel file from the repo root
+          df = pd.read_excel("merged_labs_pharmacy.xlsx")
+
+          # 2) Basic cleaning – you can expand this later
+          df["Note"] = df["Note"].astype(str).str.strip()
+
+          # 3) Save preprocessed file
+          df.to_excel("khcc_preprocessed.xlsx", index=False)
+          print("Saved khcc_preprocessed.xlsx with", len(df), "rows")
+          EOF
+
+      - name: Upload preprocessed file
+        uses: actions/upload-artifact@v4
+        with:
+          name: khcc-preprocessed
+          path: khcc_preprocessed.xlsx
