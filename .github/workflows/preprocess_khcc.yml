@@ -1,7 +1,7 @@
-name: Preprocess KHCC data
+name: preprocess_khcc
 
 on:
-  # You run it manually from the Actions tab
+  # Manual trigger from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -15,15 +15,20 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas openpyxl
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas openpyxl
+          fi
 
       - name: Run preprocessing script
         run: |
+          echo "Running KHCC preprocessing script..."
           python scripts/preprocess_khcc_data.py
 
       - name: Upload preprocessed file
