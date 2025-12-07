@@ -1,167 +1,220 @@
-"""
-preprocess_khcc_data.py
-----------------------------------------
-Official preprocessing pipeline for KHCC clinical pharmacist notes.
-
-Author: Enas Altatar
-Supervisors: Dr. Bassam Hammo, Dr. Abdullah Qusef
-Date: 2025
-
-Purpose:
---------
-This script converts the raw KHCC extract (merged_labs_pharmacy.xlsx)
-into a clean, structured format where:
-
-    1 row = 1 clinical pharmacist note
-
-Each note aggregates:
-- The full pharmacist recommendation text
-- All associated laboratory results
-- Metadata (MRN, visit, location, timestamps)
-- A unique case_id for downstream AI generation
-
-This script produces two output files:
-1) data/interim/pharmacy_notes_with_labs.xlsx
-2) data/processed/khcc_cases_for_ai.xlsx   (ready for LLM generation)
-
-Inputs:
--------
-data/raw/merged_labs_pharmacy.xlsx
-
-Outputs:
---------
-See above.
-
-Usage:
-------
-python scripts/preprocess_khcc_data.py
-"""
-
-import pandas as pd
-import numpy as np
+import re
 from pathlib import Path
 
+import pandas as pd
 
-# -------------------------------------------------------------------
-# Paths
-# -------------------------------------------------------------------
-RAW_PATH = Path("data/raw/merged_labs_pharmacy.xlsx")
-INTERIM_PATH = Path("data/interim/pharmacy_notes_with_labs.xlsx")
-PROCESSED_PATH = Path("data/processed/khcc_cases_for_ai.xlsx")
+# ---------- CONFIG ----------
+INPUT_FILE = "merged_labs_pharmacy.xlsx"
+OUTPUT_FILE = "khcc_preprocessed.xlsx"
 
-INTERIM_PATH.parent.mkdir(parents=True, exist_ok=True)
-PROCESSED_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-
-# -------------------------------------------------------------------
-# Step 1 — Load KHCC extract
-# -------------------------------------------------------------------
-def load_raw_data(path: Path) -> pd.DataFrame:
-    """Load raw KHCC pharmacist extract."""
-    print(f"Loading raw dataset: {path}")
-    df = pd.read_excel(path)
-    print(f"Loaded {df.shape[0]} rows.")
-    return df
-
-
-# -------------------------------------------------------------------
-# Step 2 — Aggregate labs per note
-# -------------------------------------------------------------------
-def aggregate_labs(group: pd.DataFrame) -> str:
-    """Convert all lab rows into a single semicolon-separated string."""
-    labs = []
-    for _, row in group.iterrows():
-        name = str(row.get("TEST_NAME", "")).strip()
-        result = str(row.get("TEST_RESULT", "")).strip()
-        if not name:
-            continue
-        labs.append(f"{name}: {result}")
-    return "; ".join(labs)
-
-
-# -------------------------------------------------------------------
-# Step 3 — Produce note-level table
-# -------------------------------------------------------------------
-NOTE_KEYS = [
-    "MRN", "Document_Number", "DOCUMENT_TYPE", "Entry_Date",
-    "Visit", "VISIT_LOCATION", "SERVICE",
-    "Parent_Number", "Parent_Type", "HOSPITAL_LOCATION",
-    "AUTHOR_SERVICE", "Visit_Number",
-    "Has_Clinical_Recommendation", "Note"
+# List of common breast cancer chemo / targeted meds to look for in notes
+CHEMO_DRUGS = [
+    "doxorubicin", "adriamycin",
+    "epirubicin",
+    "cyclophosphamide",
+    "docetaxel",
+    "paclitaxel", "taxol", "abraxane",
+    "carboplatin", "cisplatin",
+    "trastuzumab", "herceptin",
+    "pertuzumab", "perjeta",
+    "lapatinib",
+    "capecitabine", "xeloda",
+    "vinorelbine",
+    "gemcitabine",
+    "fulvestrant",
+    "letrozole", "anastrozole", "exemestane",
 ]
 
-def build_note_level_table(df: pd.DataFrame) -> pd.DataFrame:
-    """Return one row per pharmacist note with aggregated lab results."""
-    print("Building note-level table...")
-    grouped = df.groupby(["MRN", "Document_Number"], dropna=False)
-
-    rows = []
-    for (mrn, doc), group in grouped:
-        base = group.iloc[0][NOTE_KEYS].copy()
-        labs_text = aggregate_labs(group)
-        base["LABS_TEXT"] = labs_text
-        base["N_LABS"] = len(group["TEST_NAME"].dropna())
-        rows.append(base)
-
-    notes_df = pd.DataFrame(rows)
-    print(f"Created {notes_df.shape[0]} unique notes.")
-    return notes_df
+# Simple dictionary for comorbidities (you can add more)
+COMORBIDITIES = {
+    "DM": r"\b(dm|diabetes)\b",
+    "HTN": r"\b(htn|hypertension)\b",
+    "IHD": r"\b(ihd|ischemic heart disease|coronary artery disease|cad)\b",
+    "CKD": r"\b(ckd|chronic kidney disease|renal impairment|renal failure)\b",
+    "Asthma": r"\b(asthma)\b",
+    "Hypothyroidism": r"\b(hypothyroid|hypothyroidism)\b",
+}
 
 
-# -------------------------------------------------------------------
-# Step 4 — Final formatting for LLM generator
-# -------------------------------------------------------------------
-def format_for_llm(notes_df: pd.DataFrame) -> pd.DataFrame:
+# ---------- HELPERS ----------
+
+def clean_note(text: str) -> str:
+    """Basic cleaning of clinical note text."""
+    if pd.isna(text):
+        return ""
+    # Normalize line breaks / spaces
+    text = str(text)
+    text = text.replace("\r", " ").replace("\n", " ")
+    # Remove duplicated spaces
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def extract_bsa(text: str):
     """
-    Prepare final table matching the expected AI generator schema.
-    Fields like diagnosis_subtype or regimen are missing in KHCC file
-    but can be extracted later from the Note text or left blank.
+    Extract BSA if written like:
+    - BSA 1.73
+    - BSA=1.8 m2
+    - BSA: 1.65 m^2
     """
+    if not text:
+        return None
+    m = re.search(r"\bBSA\b[^0-9]{0,10}([1-2]\.\d{1,2})", text, flags=re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
 
-    print("Formatting for LLM generator...")
 
-    out = pd.DataFrame()
-    out["case_id"] = notes_df.apply(
-        lambda r: f"{r['MRN']}_{r['Document_Number']}", axis=1
+def extract_cycle(text: str):
+    """
+    Extract cycle number like:
+    - Cycle 3
+    - cycle #4
+    - C3
+    """
+    if not text:
+        return None
+
+    # Pattern: "Cycle 3"
+    m = re.search(r"\b[Cc]ycle\D{0,3}(\d+)", text)
+    if not m:
+        # Pattern: "C3", "C 4", etc. (avoid catching 'CKD', etc.)
+        m = re.search(r"\bC\s?(\d+)\b", text)
+    if not m:
+        return None
+
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def extract_chemo_meds(text: str):
+    """Return ;–separated list of chemo drugs mentioned in the note."""
+    if not text:
+        return None
+    lower = text.lower()
+    found = []
+    for drug in CHEMO_DRUGS:
+        if drug.lower() in lower:
+            found.append(drug)
+    found = sorted(set(found))
+    return "; ".join(found) if found else None
+
+
+def extract_comorbid_flags(text: str):
+    """
+    Return dict {label: bool} for each comorbidity based on regex patterns.
+    Uses the CLEANED note (note_clean).
+    """
+    flags = {}
+    for label, pattern in COMORBIDITIES.items():
+        flags[label] = bool(re.search(pattern, text, flags=re.IGNORECASE))
+    return flags
+
+
+def build_comorbid_list(row, labels):
+    """Combine individual comorbidity flags into one text column."""
+    present = [lbl for lbl in labels if row[f"comorb_{lbl}"]]
+    return "; ".join(present) if present else None
+
+
+def extract_other_meds(text: str):
+    """
+    Very rough extraction of 'other meds' – looks for phrases like:
+    - 'other meds: ...'
+    - 'home meds: ...'
+    - 'currently on: ...'
+    This is a placeholder that you can refine later.
+    """
+    if not text:
+        return None
+    patterns = [
+        r"(home meds?:\s*)(.+?)(?=[.;]|$)",
+        r"(other meds?:\s*)(.+?)(?=[.;]|$)",
+        r"(currently on:\s*)(.+?)(?=[.;]|$)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            return m.group(2).strip()
+    return None
+
+
+# ---------- MAIN PIPELINE ----------
+
+def main():
+    here = Path(__file__).resolve().parent
+    input_path = here / INPUT_FILE
+    output_path = here / OUTPUT_FILE
+
+    print(f"Loading: {input_path}")
+    df = pd.read_excel(input_path)
+
+    # --- keep your original columns as they are ---
+
+    # 1) Clean note text
+    df["note_clean"] = df["Note"].apply(clean_note)
+
+    # 2) Length features
+    df["note_len_chars"] = df["note_clean"].str.len()
+    df["note_len_words"] = df["note_clean"].str.split().str.len()
+
+    # 3) Simple semantic flags from previous version (you already have these – keep or remove)
+    df["has_dose_change"] = df["note_clean"].str.contains(
+        r"dose|reduce dose|increase dose|adjust dose|mg/m2",
+        case=False,
+        regex=True,
+    )
+    df["has_start_stop"] = df["note_clean"].str.contains(
+        r"start|initiate|stop|discontinue|hold",
+        case=False,
+        regex=True,
+    )
+    df["has_interaction"] = df["note_clean"].str.contains(
+        r"interaction|contraindication|avoid with|combination with",
+        case=False,
+        regex=True,
+    )
+    df["has_monitoring_plan"] = df["note_clean"].str.contains(
+        r"monitor|follow up|check lab|repeat lab|ECG|LFT|RFT",
+        case=False,
+        regex=True,
     )
 
-    # Fields required by generator (empty for now)
-    out["diagnosis_subtype"] = ""
-    out["regimen"] = ""
-    out["cycle"] = ""
-    out["bsa"] = ""
-    out["lvef"] = ""
-    out["crcl"] = ""
-    out["ast"] = ""
-    out["alt"] = ""
-    out["tbil"] = ""
-    out["comorbidities"] = ""
-    out["meds"] = ""
+    # 4) NEW: BSA, Cycle, Chemo meds, Comorbidities, Other meds
 
-    # Keep original note text & labs for extraction stage
-    out["note_text"] = notes_df["Note"]
-    out["labs_text"] = notes_df["LABS_TEXT"]
+    print("Extracting BSA...")
+    df["BSA_m2"] = df["note_clean"].apply(extract_bsa)
 
-    print("Formatting complete.")
-    return out
+    print("Extracting cycle number...")
+    df["cycle_number"] = df["note_clean"].apply(extract_cycle)
 
+    print("Extracting chemo medications...")
+    df["chemo_meds"] = df["note_clean"].apply(extract_chemo_meds)
 
-# -------------------------------------------------------------------
-# Main
-# -------------------------------------------------------------------
-def main():
-    df = load_raw_data(RAW_PATH)
+    print("Extracting comorbidities flags...")
+    for label in COMORBIDITIES.keys():
+        df[f"comorb_{label}"] = df["note_clean"].apply(
+            lambda txt, lbl=label: extract_comorbid_flags(txt)[lbl]
+        )
 
-    # Ensure only clinical recommendation notes are included
-    df = df[df["Has_Clinical_Recommendation"].astype(str).str.lower() == "yes"]
+    # Combine comorbidities into one list column
+    df["comorbidities_list"] = df.apply(
+        lambda row: build_comorbid_list(row, list(COMORBIDITIES.keys())),
+        axis=1,
+    )
 
-    notes_df = build_note_level_table(df)
-    notes_df.to_excel(INTERIM_PATH, index=False)
-    print(f"Saved interim note-level file: {INTERIM_PATH}")
+    print("Extracting other/home meds (very rough)...")
+    df["other_meds_free_text"] = df["note_clean"].apply(extract_other_meds)
 
-    ai_ready = format_for_llm(notes_df)
-    ai_ready.to_excel(PROCESSED_PATH, index=False)
-    print(f"Saved AI-ready file: {PROCESSED_PATH}")
+    # 5) Save
+    print(f"Saving to: {output_path}")
+    df.to_excel(output_path, index=False)
+    print("Done ✅")
 
 
 if __name__ == "__main__":
