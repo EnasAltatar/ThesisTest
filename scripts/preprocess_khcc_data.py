@@ -1,468 +1,450 @@
-import math
 import re
 from pathlib import Path
 
 import pandas as pd
 
+# ---------- CONFIG ----------
 
-# -------------- CONFIG --------------
-
-# These filenames are relative to the repo root
 INPUT_FILE = "merged_labs_pharmacy.xlsx"
 OUTPUT_FILE = "khcc_preprocessed.xlsx"
 
+# Columns that must NOT appear in the final output
+COLUMNS_TO_DROP = [
+    "Subtype",
+    "PriorLines",
+    "PriorTherapies",
+    "BestPriorResponse",
+    "DosePlan",
+    "Schedule",
+    "PreMeds",
+    "PostMeds",
+    "IntendedDoseIntensity_pct",
+    "ActualDoseIntensity_pct",
+    "DoseAdjustmentNote",
+    "InteractionsCheck",
+    "Contraindications",
+    "SupportiveCareInstructions",
+    "Rationale",
+]
 
-# -------------- LAB MAPPING --------------
+# ---------- LAB TEST PATTERNS ----------
 
-# Map many possible TEST_NAME strings to the unified column names
-LAB_TEST_MAP = {
-    "WBC_x10^9_L": [
-        "WBC", "WHITE BLOOD CELL", "WBC COUNT"
-    ],
+LAB_PATTERNS = {
+    "WBC_x10^9_L": [r"\bWBC\b", r"WHITE BLOOD CELL"],
+    # FIXED: ANC now only from specific ANC tests
     "ANC_x10^9_L": [
-        "ANC", "ABSOLUTE NEUTROPHIL", "NEUTROPHIL COUNT"
+        r"\bANC\b",
+        r"ABSOLUTE NEUTROPHIL",
+        r"NEUTROPHIL.*ABSOLUTE",
+        r"NEUTS ABS",
     ],
-    "Hemoglobin_g_dL": [
-        "HGB", "HEMOGLOBIN"
-    ],
-    "Platelets_x10^9_L": [
-        "PLT", "PLATELET"
-    ],
-    "Creatinine_mg_dL": [
-        "CREAT", "CREATININE"
-    ],
-    "eGFR_mL_min_1.73m2": [
-        "EGFR", "ESTIMATED GFR"
-    ],
-    "BUN_mg_dL": [
-        "BUN", "UREA"
-    ],
-    "AST_U_L": [
-        "AST", "SGOT"
-    ],
-    "ALT_U_L": [
-        "ALT", "SGPT"
-    ],
-    "ALP_U_L": [
-        "ALP", "ALK PHOS", "ALKALINE PHOSPHATASE"
-    ],
+    "Hemoglobin_g_dL": [r"\bHGB\b", r"HEMOGLOBIN"],
+    "Platelets_x10^9_L": [r"\bPLT\b", r"PLATELET"],
+    "Creatinine_mg_dL": [r"\bCREATININE\b", r"\bCREA\b"],
+    "eGFR_mL_min_1.73m2": [r"\beGFR\b", r"ESTIMATED GFR"],
+    "BUN_mg_dL": [r"\bBUN\b", r"UREA NITROGEN"],
+    "AST_U_L": [r"\bAST\b", r"ASPARTATE TRANSAMINASE"],
+    "ALT_U_L": [r"\bALT\b", r"ALANINE TRANSAMINASE"],
+    "ALP_U_L": [r"\bALP\b", r"ALKALINE PHOSPHATASE"],
     "TotalBilirubin_mg_dL": [
-        "TBIL", "TOTAL BILI", "TOTAL BILIRUBIN"
+        r"TOTAL BILIRUBIN",
+        r"\bTBIL\b",
+        r"\bT\.? BILI\b",
     ],
-    "Albumin_g_dL": [
-        "ALB", "ALBUMIN"
-    ],
-    "Troponin_ng_L": [
-        "TROPONIN", "TROP I", "TROP T"
-    ],
+    "Albumin_g_dL": [r"\bALBUMIN\b"],
+    "Troponin_ng_L": [r"TROPONIN"],
+    "LVEF_percent": [r"\bLVEF\b", r"EJECTION FRACTION"],
 }
 
-
-# -------------- TEXT PATTERNS --------------
-
-STAGE_PATTERN = re.compile(r"STAGE\s*([0IVX]+[AB]?)", re.IGNORECASE)
-TNM_COMBINED_PATTERN = re.compile(r"\bT(\d[abAB]?)N(\d[abAB]?)M(\d[abAB]?)\b", re.IGNORECASE)
-TNM_SPLIT_T_PATTERN = re.compile(r"\bT(\d[abAB]?)\b", re.IGNORECASE)
-TNM_SPLIT_N_PATTERN = re.compile(r"\bN(\d[abAB]?)\b", re.IGNORECASE)
-TNM_SPLIT_M_PATTERN = re.compile(r"\bM(\d[abAB]?)\b", re.IGNORECASE)
-
-GRADE_PATTERN = re.compile(r"(GRADE\s*([123]))|(G([123]))", re.IGNORECASE)
-
-HEIGHT_PATTERN = re.compile(r"(HEIGHT|HT)\s*[:=]?\s*(\d{2,3})\s*cm", re.IGNORECASE)
-WEIGHT_PATTERN = re.compile(r"(WEIGHT|WT)\s*[:=]?\s*(\d{2,3}(?:\.\d+)?)\s*kg", re.IGNORECASE)
-
-CYCLE_PATTERN = re.compile(r"CYCLE\s*(\d+)", re.IGNORECASE)
-
-# Keywords for comorbidities (very simple bag-of-words style)
-COMORBIDITY_KEYWORDS = {
-    "Comorbidity_DM": ["DIABETES", "DM", "T2DM", "TYPE 2 DIABETES"],
-    "Comorbidity_HTN": ["HYPERTENSION", "HTN", "HIGH BLOOD PRESSURE"],
-    "Comorbidity_CAD": ["CORONARY ARTERY DISEASE", "CAD", "ISCHEMIC HEART"],
-    "Comorbidity_CKD": ["CHRONIC KIDNEY", "CKD", "RENAL FAILURE"],
-    "Comorbidity_Asthma": ["ASTHMA"],
-    "Comorbidity_Depression": ["DEPRESSION", "DEPRESSIVE DISORDER"],
-}
-
-# Very small list just to flag that a regimen is mentioned.
-# We are not trying to be perfect here – this is mainly to populate Regimen
-CHEMO_KEYWORDS = [
-    "AC ", "EC ", "FEC", "TC ", "TCH", "HERCEPTIN", "PERTUZUMAB",
-    "PACLITAXEL", "DOCETAXEL", "DOXORUBICIN", "EPIRUBICIN",
-    "CARBOPLATIN", "CYCLOPHOSPHAMIDE"
+# Patterns for URINE tests (for the Urine_Results column)
+URINE_PATTERNS = [
+    r"\bURINE\b",
+    r"URINALYSIS",
+    r"URINE ANALYSIS",
+    r"URINALYSIS, ROUTINE",
 ]
 
 
-# -------------- HELPER FUNCTIONS --------------
+# ---------- TEXT CLEANING / UTILITIES ----------
 
 
-def map_lab_name(raw_name: str):
-    if not isinstance(raw_name, str):
-        return None
-    upper = raw_name.upper()
-    for target_col, patterns in LAB_TEST_MAP.items():
-        for pat in patterns:
-            if pat in upper:
-                return target_col
-    return None
+def clean_note_text(text: str) -> str:
+    if pd.isna(text):
+        return ""
+    # Normalize whitespace and lowercase for pattern matching
+    text = str(text)
+    text = re.sub(r"\s+", " ", text)
+    return text
 
 
-def extract_stage(note: str):
-    m = STAGE_PATTERN.search(note)
-    if m:
-        return m.group(1).upper()
-    return pd.NA
-
-
-def extract_tnm(note: str):
-    t_val = n_val = m_val = pd.NA
-    m_combined = TNM_COMBINED_PATTERN.search(note)
-    if m_combined:
-        t_val, n_val, m_val = m_combined.groups()
-    else:
-        mt = TNM_SPLIT_T_PATTERN.search(note)
-        mn = TNM_SPLIT_N_PATTERN.search(note)
-        mm = TNM_SPLIT_M_PATTERN.search(note)
-        if mt:
-            t_val = mt.group(1)
-        if mn:
-            n_val = mn.group(1)
-        if mm:
-            m_val = mm.group(1)
-    return t_val, n_val, m_val
-
-
-def extract_grade(note: str):
-    m = GRADE_PATTERN.search(note)
+def extract_first_match(text: str, pattern: str, flags=0):
+    if not text:
+        return pd.NA
+    m = re.search(pattern, text, flags)
     if not m:
         return pd.NA
-    # Either group(2) or group(4) will contain the number
-    return (m.group(2) or m.group(4)).strip()
+    # If there is a capturing group, return it; else return full match
+    return m.group(1) if m.lastindex else m.group(0)
 
 
-def extract_receptor_status(note: str, marker: str):
-    up = note.upper()
-    if marker + " NEG" in up or f"{marker}-" in up:
-        return "Negative"
-    if marker + " POS" in up or f"{marker}+" in up or marker + " POSITIVE" in up:
-        return "Positive"
+# ---------- CLINICAL EXTRACTION HELPERS ----------
+
+
+def extract_stage(text: str):
+    # e.g. "Stage II", "stage 3A"
+    return extract_first_match(
+        text,
+        r"stage\s*([0-4]{1}[A-C]?)",
+        flags=re.IGNORECASE,
+    )
+
+
+def extract_tnm(text: str):
+    t = extract_first_match(text, r"\bT([0-4][a-c]?)\b", flags=re.IGNORECASE)
+    n = extract_first_match(text, r"\bN([0-3][a-c]?)\b", flags=re.IGNORECASE)
+    m = extract_first_match(text, r"\bM([0-1])\b", flags=re.IGNORECASE)
+    return t, n, m
+
+
+def extract_grade(text: str):
+    # e.g. "Grade 3", "grade II"
+    grade = extract_first_match(text, r"grade\s*([1-3Ii]{1})", flags=re.IGNORECASE)
+    return grade
+
+
+def parse_receptor_status(text: str, receptor: str):
+    """
+    receptor: 'ER', 'PR', 'HER2'
+    Returns one of: 'Positive', 'Negative', 'Equivocal', 'NA'
+    """
+    if not text:
+        return pd.NA
+
+    # Simplify text for robust matching
+    lower = text.lower()
+
+    if receptor.lower() == "her2":
+        # HER2 3+ positive, 0/1+ negative, 2+ equivocal
+        pos_patterns = [r"her2\s*3\+", r"her2\s*positive", r"her-2\s*neu\s*3\+"]
+        neg_patterns = [r"her2\s*[01]\+", r"her2\s*negative", r"her-2\s*neu\s*[01]\+"]
+        eq_patterns = [r"her2\s*2\+", r"equivocal"]
+    else:
+        # ER / PR
+        pos_patterns = [rf"\b{receptor}\s*positive\b", rf"{receptor}\s*\+\b"]
+        neg_patterns = [rf"\b{receptor}\s*negative\b", rf"{receptor}\s*-\b"]
+        eq_patterns = []
+
+    for p in pos_patterns:
+        if re.search(p, lower, re.IGNORECASE):
+            return "Positive"
+    for p in neg_patterns:
+        if re.search(p, lower, re.IGNORECASE):
+            return "Negative"
+    for p in eq_patterns:
+        if re.search(p, lower, re.IGNORECASE):
+            return "Equivocal"
+
     return pd.NA
 
 
-def derive_subtype(er, pr, her2):
-    er_pos = str(er).upper().startswith("POS")
-    pr_pos = str(pr).upper().startswith("POS")
-    her2_pos = str(her2).upper().startswith("POS") or "3+" in str(her2)
-    if (er_pos or pr_pos) and not her2_pos:
-        return "HR+/HER2-"
-    if (er_pos or pr_pos) and her2_pos:
-        return "HR+/HER2+"
-    if (not er_pos and not pr_pos) and her2_pos:
-        return "HR-/HER2+"
-    if (not er_pos and not pr_pos) and not her2_pos:
-        return "Triple-negative"
-    return pd.NA
-
-
-def extract_height_weight(note: str):
-    h = w = pd.NA
-    mh = HEIGHT_PATTERN.search(note)
-    mw = WEIGHT_PATTERN.search(note)
-    if mh:
-        try:
-            h = float(mh.group(2))
-        except ValueError:
-            pass
-    if mw:
-        try:
-            w = float(mw.group(2))
-        except ValueError:
-            pass
-    return h, w
-
-
-def compute_bsa(height_cm, weight_kg, existing_bsa):
+def extract_height_weight(text: str):
     """
-    If BSA already present (from labs), keep it.
-    Otherwise compute using Mosteller if both height & weight exist.
+    Try to pull height (cm) and weight (kg) from the note.
     """
-    if pd.notna(existing_bsa):
-        return existing_bsa
+    if not text:
+        return pd.NA, pd.NA
+
+    # Height in cm: "Height: 163 cm" or "Ht 163 cm"
+    h = extract_first_match(
+        text,
+        r"(?:height|ht)\s*[:=]?\s*([1-2]\d{2})\s*cm",
+        flags=re.IGNORECASE,
+    )
+
+    # Weight in kg: "Weight 70 kg", "Wt: 72 kg"
+    w = extract_first_match(
+        text,
+        r"(?:weight|wt)\s*[:=]?\s*(\d{2,3})\s*kg",
+        flags=re.IGNORECASE,
+    )
+
+    try:
+        h_val = float(h) if h is not pd.NA else pd.NA
+    except Exception:
+        h_val = pd.NA
+
+    try:
+        w_val = float(w) if w is not pd.NA else pd.NA
+    except Exception:
+        w_val = pd.NA
+
+    return h_val, w_val
+
+
+def calculate_bsa_m2(height_cm, weight_kg):
+    """
+    Du Bois formula, only if both height and weight exist.
+    """
     if pd.isna(height_cm) or pd.isna(weight_kg):
         return pd.NA
     try:
-        bsa = math.sqrt((height_cm * weight_kg) / 3600.0)
-        return round(bsa, 2)
+        bsa = 0.007184 * (float(height_cm) ** 0.725) * (float(weight_kg) ** 0.425)
+        return round(bsa, 3)
     except Exception:
         return pd.NA
 
 
-def extract_cycle_number(note: str, visit: str):
-    for text in (str(visit), str(note)):
-        m = CYCLE_PATTERN.search(text)
-        if m:
-            try:
-                return int(m.group(1))
-            except ValueError:
-                return pd.NA
+def extract_cycle_number(text: str):
+    # e.g. "Cycle 3", "C3D1", "C2"
+    c = extract_first_match(text, r"(?:cycle|c)(\d{1,2})\b", flags=re.IGNORECASE)
+    return c
+
+
+def extract_regimen(text: str):
+    """
+    Very rough: pull common chemo regimens if explicitly mentioned.
+    """
+    if not text:
+        return pd.NA
+
+    regimens = [
+        "AC-T",
+        "AC T",
+        "FEC",
+        "FEC-D",
+        "FEC D",
+        "TC",
+        "TCH",
+        "TCHP",
+        "CMF",
+        "EC",
+        "EC-P",
+    ]
+    for reg in regimens:
+        if re.search(rf"\b{re}\b".replace(" ", r"\s*"), text, re.IGNORECASE):
+            return reg
+
     return pd.NA
 
 
-def extract_comorbidities(note: str):
-    up = note.upper()
+# ---------- COMORBIDITIES ----------
+
+COMORBIDITY_PATTERNS = {
+    "Comorbidity_DM": [r"diabetes", r"dm\b"],
+    "Comorbidity_HTN": [r"hypertension", r"htn\b"],
+    "Comorbidity_CAD": [r"coronary artery disease", r"ischemic heart", r"cad\b"],
+    "Comorbidity_CKD": [r"chronic kidney disease", r"ckd\b", r"renal failure"],
+    "Comorbidity_Asthma": [r"\basthma\b"],
+    "Comorbidity_Depression": [r"\bdepression\b", r"depressive disorder"],
+}
+
+
+def extract_comorbidities(text: str):
     result = {}
-    for col, keywords in COMORBIDITY_KEYWORDS.items():
-        result[col] = any(kw in up for kw in keywords)
-    # Charlson-like score = simple count of True flags
-    score = sum(1 for v in result.values() if v)
-    result["CharlsonLikeScore"] = score if score > 0 else pd.NA
+    lower = text.lower() if text else ""
+    for col, patterns in COMORBIDITY_PATTERNS.items():
+        found = any(re.search(p, lower, re.IGNORECASE) for p in patterns)
+        result[col] = 1 if found else 0
     return result
 
 
-def extract_regimen(note: str):
-    up = note.upper()
-    found = []
-    for kw in CHEMO_KEYWORDS:
-        if kw.strip() in up and kw.strip() not in found:
-            found.append(kw.strip())
-    if not found:
+def compute_charlson_like(comorbid_dict: dict):
+    # Simple sum of present comorbidities – a rough Charlson-like index
+    return sum(comorbid_dict.values())
+
+
+# ---------- LAB HELPERS ----------
+
+
+def get_lab_value(labs_df: pd.DataFrame, patterns):
+    """
+    Find the first lab whose TEST_NAME matches any pattern.
+    """
+    if labs_df is None or labs_df.empty:
         return pd.NA
-    return " + ".join(found)
+
+    mask = pd.Series(False, index=labs_df.index)
+    for p in patterns:
+        mask = mask | labs_df["TEST_NAME"].str.contains(p, case=False, na=False, regex=True)
+
+    selected = labs_df[mask]
+    if selected.empty:
+        return pd.NA
+
+    # If multiple rows, take the last one (assuming most recent or most relevant)
+    val = selected.iloc[-1]["TEST_RESULT"]
+    return val
 
 
-# -------------- MAIN PIPELINE --------------
+def combine_labs_readable(labs_df: pd.DataFrame):
+    """
+    Combine all lab tests into a single string per note, formatted for readability.
+    Example: "WBC: 6.5 | Hb: 11.2 | Platelets: 250 ..."
+    """
+    if labs_df is None or labs_df.empty:
+        return pd.NA
+
+    parts = []
+    for _, row in labs_df.iterrows():
+        name = str(row.get("TEST_NAME", "")).strip()
+        res = str(row.get("TEST_RESULT", "")).strip()
+        if not name and not res:
+            continue
+        parts.append(f"{name}: {res}")
+    if not parts:
+        return pd.NA
+    return " | ".join(parts)
+
+
+def get_urine_results(labs_df: pd.DataFrame):
+    """
+    Build a Urine_Results column from all lab rows that are clearly urine tests.
+    """
+    if labs_df is None or labs_df.empty:
+        return pd.NA
+
+    mask = pd.Series(False, index=labs_df.index)
+    for p in URINE_PATTERNS:
+        mask = mask | labs_df["TEST_NAME"].str.contains(p, case=False, na=False, regex=True)
+
+    urine_rows = labs_df[mask]
+    if urine_rows.empty:
+        return pd.NA
+
+    parts = []
+    for _, row in urine_rows.iterrows():
+        name = str(row.get("TEST_NAME", "")).strip()
+        res = str(row.get("TEST_RESULT", "")).strip()
+        if not name and not res:
+            continue
+        parts.append(f"{name}: {res}")
+
+    if not parts:
+        return pd.NA
+    return " | ".join(parts)
+
+
+# ---------- MAIN PREPROCESSING ----------
 
 
 def main():
-    repo_root = Path(__file__).resolve().parents[1]
-    input_path = repo_root / INPUT_FILE
-    output_path = repo_root / OUTPUT_FILE
+    input_path = Path(INPUT_FILE)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    print(f"Loading: {input_path}")
     df = pd.read_excel(input_path)
 
-    # Ensure text columns are strings
-    if "Note" in df.columns:
-        df["Note"] = df["Note"].fillna("").astype(str)
-    else:
-        raise RuntimeError("Expected a 'Note' column in the input file.")
-
-    # ---------- Build labs wide table ----------
-    labs = df[["MRN", "Document_Number", "TEST_NAME", "TEST_RESULT"]].copy()
-    labs = labs.dropna(subset=["TEST_NAME", "TEST_RESULT"])
-    labs["Lab_Var"] = labs["TEST_NAME"].apply(map_lab_name)
-    labs = labs.dropna(subset=["Lab_Var"])
-
-    if not labs.empty:
-        # pivot to wide format
-        labs_wide = (
-            labs.pivot_table(
-                index=["MRN", "Document_Number"],
-                columns="Lab_Var",
-                values="TEST_RESULT",
-                aggfunc="first",
-            )
-            .reset_index()
-        )
-
-        # also keep a human-readable labs text field
-        labs_text = (
-            labs.groupby(["MRN", "Document_Number"])
-            .apply(
-                lambda x: "; ".join(
-                    f"{n}: {r}" for n, r in zip(x["TEST_NAME"], x["TEST_RESULT"])
-                )
-            )
-            .rename("Labs_Text")
-            .reset_index()
-        )
-    else:
-        labs_wide = df[["MRN", "Document_Number"]].drop_duplicates()
-        labs_text = labs_wide.copy()
-        labs_text["Labs_Text"] = ""
-
-    # ---------- One row per clinical note ----------
-    # Take the first row per (MRN, Document_Number) for the non-lab metadata
-    base_cols = [
-        col
-        for col in df.columns
-        if col
-        not in {
-            "TEST_NAME",
-            "TEST_RESULT",
-        }
-    ]
-    base = (
-        df.sort_values("Entry_Date")
-        .groupby(["MRN", "Document_Number"], as_index=False)[base_cols]
-        .first()
-    )
-
-    merged = (
-        base.merge(labs_wide, on=["MRN", "Document_Number"], how="left")
-        .merge(labs_text, on=["MRN", "Document_Number"], how="left")
-    )
-
-    # ---------- Derived oncology variables from Note text ----------
-
-    print("Extracting stage / TNM / grade / receptors from notes ...")
-    merged["Stage"] = merged["Note"].apply(extract_stage)
-
-    tnm_values = merged["Note"].apply(extract_tnm)
-    merged["TNM_T"] = tnm_values.apply(lambda x: x[0])
-    merged["TNM_N"] = tnm_values.apply(lambda x: x[1])
-    merged["TNM_M"] = tnm_values.apply(lambda x: x[2])
-
-    merged["Grade"] = merged["Note"].apply(extract_grade)
-
-    merged["ER_Status"] = merged["Note"].apply(lambda x: extract_receptor_status(x, "ER"))
-    merged["PR_Status"] = merged["Note"].apply(lambda x: extract_receptor_status(x, "PR"))
-    merged["HER2_Status"] = merged["Note"].apply(
-        lambda x: extract_receptor_status(x, "HER2")
-    )
-
-    merged["Subtype"] = merged.apply(
-        lambda row: derive_subtype(
-            row["ER_Status"], row["PR_Status"], row["HER2_Status"]
-        ),
-        axis=1,
-    )
-
-    # ---------- Anthropometrics & BSA ----------
-    print("Extracting height / weight / BSA ...")
-    hw = merged["Note"].apply(extract_height_weight)
-    merged["Height_cm"] = hw.apply(lambda x: x[0])
-    merged["Weight_kg"] = hw.apply(lambda x: x[1])
-
-    # If a BSA column already exists from labs, keep it; otherwise compute
-    if "BSA_m2" not in merged.columns:
-        merged["BSA_m2"] = pd.NA
-
-    merged["BSA_m2"] = merged.apply(
-        lambda row: compute_bsa(row["Height_cm"], row["Weight_kg"], row["BSA_m2"]),
-        axis=1,
-    )
-
-    # ---------- Cycle number ----------
-    print("Extracting cycle numbers ...")
-    merged["CycleNumber"] = merged.apply(
-        lambda row: extract_cycle_number(row.get("Note", ""), row.get("Visit", "")),
-        axis=1,
-    )
-
-    # ---------- Comorbidities ----------
-    print("Extracting comorbidities ...")
-    comorb_series = merged["Note"].apply(extract_comorbidities)
-    for col in COMORBIDITY_KEYWORDS.keys():
-        merged[col] = comorb_series.apply(lambda d: d[col])
-    merged["CharlsonLikeScore"] = comorb_series.apply(
-        lambda d: d["CharlsonLikeScore"]
-    )
-
-    # ---------- Regimen & medication-related placeholders ----------
-    print("Extracting regimen (rough) and creating placeholder columns ...")
-    merged["Regimen"] = merged["Note"].apply(extract_regimen)
-
-    # Place-holder columns that will later be filled by AI / downstream scripts.
-    # We create them now so the schema matches your synthetic dataset.
-    placeholder_cols = [
-        "PriorLines",
-        "PriorTherapies",
-        "BestPriorResponse",
-        "DosePlan",
-        "Schedule",
-        "PreMeds",
-        "PostMeds",
-        "IntendedDoseIntensity_pct",
-        "ActualDoseIntensity_pct",
-        "DoseAdjustmentNote",
-        "InteractionsCheck",
-        "Contraindications",
-        "SupportiveCareInstructions",
-        "Rationale",
-    ]
-    for col in placeholder_cols:
-        if col not in merged.columns:
-            merged[col] = pd.NA
-
-    # ---------- Reorder columns (optional, to resemble synthetic schema) ----------
-
-    preferred_order = [
+    # Ensure columns used later exist
+    required_cols = [
         "MRN",
         "Document_Number",
-        "DOCUMENT_TYPE",
         "Entry_Date",
-        "Visit",
-        "VISIT_LOCATION",
-        "SERVICE",
-        "Parent_Number",
-        "Parent_Type",
-        "HOSPITAL_LOCATION",
-        "AUTHOR_SERVICE",
-        "Visit_Number",
-        "Has_Clinical_Recommendation",
         "Note",
-        # oncology / patient characteristics
-        "Subtype",
-        "Stage",
-        "TNM_T",
-        "TNM_N",
-        "TNM_M",
-        "Grade",
-        "ER_Status",
-        "PR_Status",
-        "HER2_Status",
-        "WBC_x10^9_L",
-        "ANC_x10^9_L",
-        "Hemoglobin_g_dL",
-        "Platelets_x10^9_L",
-        "Creatinine_mg_dL",
-        "eGFR_mL_min_1.73m2",
-        "BUN_mg_dL",
-        "AST_U_L",
-        "ALT_U_L",
-        "ALP_U_L",
-        "TotalBilirubin_mg_dL",
-        "Albumin_g_dL",
-        "LVEF_percent",       # may stay empty – rarely available in this table
-        "Troponin_ng_L",
-        "Height_cm",
-        "Weight_kg",
-        "BSA_m2",
-        "Comorbidity_DM",
-        "Comorbidity_HTN",
-        "Comorbidity_CAD",
-        "Comorbidity_CKD",
-        "Comorbidity_Asthma",
-        "Comorbidity_Depression",
-        "CharlsonLikeScore",
-        "PriorLines",
-        "PriorTherapies",
-        "BestPriorResponse",
-        "Regimen",
-        "CycleNumber",
-        "DosePlan",
-        "Schedule",
-        "PreMeds",
-        "PostMeds",
-        "IntendedDoseIntensity_pct",
-        "ActualDoseIntensity_pct",
-        "DoseAdjustmentNote",
-        "InteractionsCheck",
-        "Contraindications",
-        "SupportiveCareInstructions",
-        "Rationale",
-        "Labs_Text",
+        "TEST_NAME",
+        "TEST_RESULT",
+        "Has_Clinical_Recommendation",
     ]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in input file: {missing}")
 
-    # Add any columns we did not explicitly list to the end
-    ordered_cols = [c for c in preferred_order if c in merged.columns] + [
-        c for c in merged.columns if c not in preferred_order
-    ]
-    merged = merged[ordered_cols]
+    # Group by clinical note (Document_Number)
+    grouped = df.groupby("Document_Number", dropna=False)
 
-    print(f"Saving preprocessed data to: {output_path}")
-    merged.to_excel(output_path, index=False)
-    print("Done.")
+    rows = []
+
+    for doc_num, group in grouped:
+        # 1) Identify the clinical pharmacist note row
+        # We assume there is exactly one note per Document_Number with Has_Clinical_Recommendation == "Yes"
+        note_rows = group[group["Has_Clinical_Recommendation"] == "Yes"]
+        if note_rows.empty:
+            # If not found, skip this group
+            continue
+
+        note_row = note_rows.iloc[0]
+        note_text = clean_note_text(note_row.get("Note", ""))
+
+        # 2) Labs belonging to this "note"
+        labs_df = group[group["TEST_NAME"].notna()].copy()
+
+        # ---------- BASE METADATA ----------
+        out = {
+            "MRN": note_row.get("MRN"),
+            "Document_Number": doc_num,
+            "Entry_Date": note_row.get("Entry_Date"),
+            "Visit_Number": note_row.get("Visit_Number"),
+            "Note": note_row.get("Note"),
+        }
+
+        # ---------- CLINICAL FIELDS FROM NOTE ----------
+        out["Stage"] = extract_stage(note_text)
+        t, n, m = extract_tnm(note_text)
+        out["TNM_T"] = t
+        out["TNM_N"] = n
+        out["TNM_M"] = m
+        out["Grade"] = extract_grade(note_text)
+
+        out["ER_Status"] = parse_receptor_status(note_text, "ER")
+        out["PR_Status"] = parse_receptor_status(note_text, "PR")
+        out["HER2_Status"] = parse_receptor_status(note_text, "HER2")
+
+        height_cm, weight_kg = extract_height_weight(note_text)
+        out["Height_cm"] = height_cm
+        out["Weight_kg"] = weight_kg
+        out["BSA_m2"] = calculate_bsa_m2(height_cm, weight_kg)
+
+        out["CycleNumber"] = extract_cycle_number(note_text)
+        out["Regimen"] = extract_regimen(note_text)
+
+        # Comorbidities
+        comorbid = extract_comorbidities(note_text)
+        out.update(comorbid)
+        out["CharlsonLikeScore"] = compute_charlson_like(comorbid)
+
+        # ---------- LAB VALUES ----------
+        if labs_df is not None and not labs_df.empty:
+            for col, patterns in LAB_PATTERNS.items():
+                out[col] = get_lab_value(labs_df, patterns)
+
+            out["Labs_Combined"] = combine_labs_readable(labs_df)
+            out["Urine_Results"] = get_urine_results(labs_df)
+        else:
+            for col in LAB_PATTERNS.keys():
+                out[col] = pd.NA
+            out["Labs_Combined"] = pd.NA
+            out["Urine_Results"] = pd.NA
+
+        # Placeholder cols (will be dropped at the end – kept here only
+        # to avoid breaking any code that might still refer to them)
+        out["PriorLines"] = pd.NA
+        out["PriorTherapies"] = pd.NA
+        out["BestPriorResponse"] = pd.NA
+        out["DosePlan"] = pd.NA
+        out["Schedule"] = pd.NA
+        out["PreMeds"] = pd.NA
+        out["PostMeds"] = pd.NA
+        out["IntendedDoseIntensity_pct"] = pd.NA
+        out["ActualDoseIntensity_pct"] = pd.NA
+        out["DoseAdjustmentNote"] = pd.NA
+        out["InteractionsCheck"] = pd.NA
+        out["Contraindications"] = pd.NA
+        out["SupportiveCareInstructions"] = pd.NA
+        out["Rationale"] = pd.NA
+
+        rows.append(out)
+
+    if not rows:
+        raise ValueError("No rows with Has_Clinical_Recommendation == 'Yes' were found.")
+
+    out_df = pd.DataFrame(rows)
+
+    # Drop the columns you explicitly don't want
+    out_df = out_df.drop(columns=COLUMNS_TO_DROP, errors="ignore")
+
+    # Save
+    out_path = Path(OUTPUT_FILE)
+    out_df.to_excel(out_path, index=False)
+    print(f"Saved preprocessed data to {out_path.resolve()}")
 
 
 if __name__ == "__main__":
