@@ -1,38 +1,35 @@
-name: preprocess_khcc
+name: Preprocess KHCC Data
 
 on:
-  # Manual trigger from the Actions tab
   workflow_dispatch:
 
 jobs:
   preprocess:
     runs-on: ubuntu-latest
 
+    env:
+      PREPROCESS: ${{ secrets.PREPROCESS }}
+
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install pandas openpyxl
-          fi
+          pip install --upgrade pip
+          pip install pandas openpyxl openai
 
-      - name: Run preprocessing script
+      - name: Run preprocessing
         run: |
-          echo "Running KHCC preprocessing script..."
           python scripts/preprocess_khcc_data.py
 
-      - name: Upload preprocessed file
+      - name: Upload result
         uses: actions/upload-artifact@v4
         with:
-          name: khcc-preprocessed
+          name: khcc_preprocessed
           path: khcc_preprocessed.xlsx
