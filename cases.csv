@@ -1,6 +1,0 @@
-Case ID,Medications,Dosages,Lab Tests,Notes
-C001,Paclitaxel + Carboplatin,175mg/m2 + AUC5,"CBC, CrCl, LFTs","Note 1"
-C002,TCHP Protocol,Docetaxel 75 + Trastuzumab,"CrCl, CBC, ALT","Note 2"
-C003,FOLFOX Regimen,Oxaliplatin + 5FU,"Hb, Platelets, LFTs","Note 3"
-C004,ABVD,Adriamycin + Bleomycin,"CBC, LDH","Note 4"
-C005,ECF,Epirubicin + Cisplatin + 5FU,"ALT, AST, BUN","Note 5"
