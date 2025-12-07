@@ -3,316 +3,277 @@ from pathlib import Path
 
 import pandas as pd
 
-# ----------------------------------------------------
-# CONFIG
-# ----------------------------------------------------
+# ------------ CONFIG ------------
+INPUT_FILE = "merged_labs_pharmacy.xlsx"
+OUTPUT_FILE = "khcc_preprocessed.xlsx"
 
-# Repository root = parent of this file's folder
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-INPUT_FILE = REPO_ROOT / "merged_labs_pharmacy.xlsx"
-OUTPUT_FILE = REPO_ROOT / "khcc_preprocessed.xlsx"
-
-# List of common breast-cancer chemo / targeted meds to look for in notes
+# Common breast-cancer chemo / targeted meds
 CHEMO_DRUGS = [
-    # Anthracyclines
-    "doxorubicin",
-    "adriamycin",
+    "doxorubicin", "adriamycin",
     "epirubicin",
-    # Taxanes
-    "paclitaxel",
-    "taxol",
-    "docetaxel",
-    "taxotere",
-    # Alkylating
     "cyclophosphamide",
-    "ifosfamide",
-    # Antimetabolites
-    "methotrexate",
-    "5-fu",
-    "5 fluorouracil",
-    "capecitabine",
-    "xeloda",
-    # HER2-targeted
-    "trastuzumab",
-    "herceptin",
-    "pertuzumab",
-    "perjeta",
+    "docetaxel",
+    "paclitaxel", "taxol", "abraxane",
+    "carboplatin",
+    "cisplatin",
+    "oxaliplatin",
+    "5-fluorouracil", "5fu", "fluorouracil",
+    "capecitabine", "xeloda",
+    "trastuzumab", "herceptin",
+    "pertuzumab", "perjeta",
+    "t-dm1", "kadcyla",
     "lapatinib",
     "neratinib",
-    # CDK4/6 inhibitors
-    "palbociclib",
-    "ribociclib",
-    "abemaciclib",
-    # Hormonal
-    "tamoxifen",
-    "letrozole",
-    "anastrozole",
-    "exemestane",
+    "tucatinib",
+    "palbociclib", "ribociclib", "abemaciclib",
+    "everolimus",
+    "olaparib", "talazoparib",
 ]
 
-# Very simple comorbidity keyword list (can be expanded later)
-COMORBIDITY_KEYWORDS = [
-    "diabetes",
-    "dm",
-    "hypertension",
-    "htn",
-    "ischemic heart disease",
-    "ihd",
-    "coronary artery disease",
-    "cad",
-    "heart failure",
-    "renal impairment",
-    "ckd",
-    "copd",
-    "asthma",
-    "hypothyroidism",
-    "hyperthyroidism",
-    "obesity",
+# Supportive / concomitant meds we may want to capture
+SUPPORTIVE_DRUGS = [
+    "dexamethasone",
+    "ondansetron", "granisetron", "palonosetron",
+    "aprepitant", "fosaprepitant",
+    "metoclopramide",
+    "lorazepam",
+    "pegfilgrastim", "filgrastim", "g-csf",
+    "epoetin", "erythropoietin",
+    "bisphosphonate", "zoledronic", "zoledronate",
+    "denosumab",
 ]
 
+# Map lab test names (from TEST_NAME) to synthetic-style column names
+LAB_TEST_MAP = {
+    "WBC_x10^9_L": ["WBC", "WHITE BLOOD"],
+    "ANC_x10^9_L": ["ANC", "ABSOLUTE NEUTROPHIL"],
+    "Hemoglobin_g_dL": ["HGB", "HEMOGLOBIN"],
+    "Platelets_x10^9_L": ["PLT", "PLATELET"],
+    "Creatinine_mg_dL": ["CREATININE"],
+    "AST_U_L": ["AST", "SGOT"],
+    "ALT_U_L": ["ALT", "SGPT"],
+    "ALP_U_L": ["ALK PHOS", "ALP", "ALKALINE PHOSPHATASE"],
+    "Total_Bilirubin_mg_dL": ["TOTAL BILI", "T BILI", "TBIL", "BILIRUBIN TOTAL"],
+    "Albumin_g_dL": ["ALBUMIN"],
+    "eGFR_mL_min_1_73m2": ["EGFR", "GFR"],
+}
 
-# ----------------------------------------------------
-# HELPER FUNCTIONS
-# ----------------------------------------------------
+# Simple comorbidity keyword map
+COMORBIDITY_KEYWORDS = {
+    "Diabetes": ["DIABETES", " DM ", "T2DM", "T1DM"],
+    "Hypertension": ["HYPERTENSION", " HTN "],
+    "IschemicHeartDisease": ["IHD", "ISCHEMIC HEART", "CORONARY ARTERY", "CAD"],
+    "HeartFailure": ["HEART FAILURE", "CHF"],
+    "CKD": ["CKD", "CHRONIC KIDNEY"],
+    "Asthma": ["ASTHMA"],
+    "COPD": ["COPD", "CHRONIC OBSTRUCTIVE"],
+    "Depression": ["DEPRESSION", "DEPRESSIVE"],
+    "Anxiety": ["ANXIETY", "GAD"],
+    "Dyslipidemia": ["DYSLIPIDEMIA", "HYPERLIPIDEMIA"],
+}
 
 
-def clean_text(text: str) -> str:
-    """Basic cleaning: ensure string, strip, collapse whitespace."""
-    if pd.isna(text):
-        return ""
-    text = str(text)
-    # Remove line breaks and tabs
-    text = re.sub(r"[\r\n\t]+", " ", text)
-    # Collapse multiple spaces
-    text = re.sub(r"\s{2,}", " ", text)
-    return text.strip()
+def normalize(text: str) -> str:
+    return (text or "").replace("\n", " ").replace("\r", " ").strip()
 
 
-def build_lab_entry(row: pd.Series) -> str:
+def extract_numeric(value: str):
     """
-    Build a one-line description for a single lab row.
-    Example: "HB: 10.5 (result) | taken: 2024-01-01 | reported: 2024-01-02 | Δdays: 1"
+    Try to pull a single numeric value (int/float) from a lab result string.
+    Returns float or None.
     """
-    test_name = clean_text(row.get("TEST_NAME", ""))
-    result = clean_text(row.get("TEST_RESULT", ""))
-    taken = clean_text(row.get("DATE/TIME SPECIMEN TAKEN", ""))
-    reported = clean_text(row.get("DATE REPORT COMPLETED", ""))
-    diff = row.get("date_diff_days", "")
-
-    parts = []
-    if test_name:
-        parts.append(test_name)
-    if result:
-        parts.append(f"result={result}")
-    if taken:
-        parts.append(f"specimen={taken}")
-    if reported:
-        parts.append(f"reported={reported}")
-    if diff != "" and not pd.isna(diff):
-        parts.append(f"Δdays={diff}")
-
-    return " | ".join(parts)
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    m = re.search(r"-?\d+(?:\.\d+)?", str(value))
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return None
 
 
-def extract_bsa(note_lower: str) -> str:
+def map_test_name(test_name: str):
+    if not isinstance(test_name, str):
+        return None
+    upper = test_name.upper()
+    for col, keywords in LAB_TEST_MAP.items():
+        for kw in keywords:
+            if kw in upper:
+                return col
+    return None
+
+
+def extract_labs_for_group(group: pd.DataFrame):
     """
-    Extract BSA patterns such as:
-    - "BSA 1.65"
-    - "BSA=1.73 m2"
-    Returns the first match as string, or "" if not found.
+    From all lab rows tied to a single pharmacist note, pick one value
+    per important test (closest in time; smallest absolute date_diff_days).
+    Also build a compact Labs_Combined string for reference.
     """
-    # Look for a number around "bsa"
-    match = re.search(r"bsa[^0-9]*([1-3]\.\d{1,2})", note_lower)
-    if match:
-        return match.group(1)
-    return ""
+    labs = {col: None for col in LAB_TEST_MAP.keys()}
+    combined_parts = []
+
+    for _, row in group.iterrows():
+        tname = row.get("TEST_NAME")
+        tres = row.get("TEST_RESULT")
+        date_diff = row.get("date_diff_days")
+
+        # Combined text, regardless of whether we parse it
+        if pd.notna(tname) or pd.notna(tres):
+            combined_parts.append(f"{tname}: {tres}")
+
+        mapped_col = map_test_name(tname)
+        if not mapped_col:
+            continue
+
+        val = extract_numeric(tres)
+        if val is None:
+            continue
+
+        # If there is more than one row for the same test, keep the one
+        # closest in time to the note (smallest |date_diff_days|).
+        cur = labs.get(mapped_col)
+        if cur is None:
+            labs[mapped_col] = (val, abs(date_diff) if pd.notna(date_diff) else 0)
+        else:
+            _, cur_diff = cur
+            new_diff = abs(date_diff) if pd.notna(date_diff) else 0
+            if new_diff < cur_diff:
+                labs[mapped_col] = (val, new_diff)
+
+    # Strip the helper date_diff and leave only numeric values
+    labs_numeric = {
+        col: (val_diff[0] if val_diff is not None else None)
+        for col, val_diff in labs.items()
+    }
+    labs_numeric["Labs_Combined"] = "; ".join(combined_parts) if combined_parts else None
+    return labs_numeric
 
 
-def extract_cycle(note_lower: str) -> str:
-    """
-    Extract cycle info such as:
-    - "cycle 1"
-    - "C1D1"
-    - "C2 D8"
-    """
-    # C1D1 / C2D8 / C3 D1 etc.
-    match = re.search(r"\bC(\d+)\s*D?(\d+)?", note_lower)
-    if match:
-        c = match.group(1)
-        d = match.group(2)
-        if d:
-            return f"C{c}D{d}"
-        return f"C{c}"
-
-    # "cycle 3"
-    match = re.search(r"cycle\s*(\d+)", note_lower)
-    if match:
-        return f"cycle {match.group(1)}"
-
-    return ""
+def extract_cycle(note: str):
+    note_u = note.upper()
+    m = re.search(r"CYCLE\s*(\d+)", note_u)
+    if not m:
+        m = re.search(r"\bC(\d+)\b", note_u)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
 
 
-def find_keywords(note_lower: str, keywords: list) -> str:
-    """
-    Return a '; '-joined list of keywords that appear in the note.
-    """
+def extract_bsa(note: str):
+    m = re.search(r"\bBSA\b[^0-9]*(\d+(?:\.\d+)?)", note, flags=re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def extract_ecog(note: str):
+    m = re.search(r"ECOG[^0-9]*(\d)", note, flags=re.IGNORECASE)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def extract_drugs(note: str, drug_list):
+    text_u = note.upper()
     found = []
-    for kw in keywords:
-        if kw.lower() in note_lower:
-            found.append(kw)
-    # Keep unique order
-    seen = set()
+    for drug in drug_list:
+        if drug.upper() in text_u:
+            found.append(drug)
+    # Deduplicate and keep original order
+    if not found:
+        return None
     unique = []
-    for x in found:
-        if x.lower() not in seen:
-            unique.append(x)
-            seen.add(x.lower())
-    return "; ".join(unique)
+    for d in found:
+        if d not in unique:
+            unique.append(d)
+    return ", ".join(unique)
 
 
-# ----------------------------------------------------
-# MAIN PIPELINE
-# ----------------------------------------------------
+def extract_comorbidities(note: str):
+    text_u = " " + note.upper() + " "
+    found = []
+    for label, patterns in COMORBIDITY_KEYWORDS.items():
+        for pat in patterns:
+            if pat in text_u:
+                found.append(label)
+                break
+    return ", ".join(found) if found else None
 
 
-def main() -> None:
-    print(f"Loading input file: {INPUT_FILE}")
+def main():
+    input_path = Path(INPUT_FILE)
+    output_path = Path(OUTPUT_FILE)
 
-    if not INPUT_FILE.exists():
-        raise FileNotFoundError(f"Input file not found at {INPUT_FILE}")
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    df = pd.read_excel(INPUT_FILE)
+    df = pd.read_excel(input_path)
 
-    print(f"Original rows: {len(df)}")
+    # Ensure Note is string
+    df["Note"] = df["Note"].fillna("").astype(str)
 
-    # Ensure expected column exists
-    expected_cols = [
-        "MRN",
-        "Document_Number",
-        "DOCUMENT_TYPE",
-        "Entry_Date",
-        "Visit",
-        "VISIT_LOCATION",
-        "SERVICE",
-        "Parent_Number",
-        "Parent_Type",
-        "HOSPITAL_LOCATION",
-        "AUTHOR_SERVICE",
-        "Note",
-        "Visit_Number",
-        "Has_Clinical_Recommendation",
-        "DATE/TIME SPECIMEN TAKEN",
-        "DATE REPORT COMPLETED",
-        "TEST_NAME",
-        "TEST_RESULT",
-        "date_diff_days",
-    ]
-    missing = [c for c in expected_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing expected columns: {missing}")
+    # Define the columns that uniquely identify a pharmacist note
+    key_cols = ["MRN", "Document_Number", "Entry_Date", "Visit_Number", "Note"]
 
-    # --- Clean note text ---
-    df["NOTE_TEXT"] = df["Note"].apply(clean_text)
-    df["NOTE_LOWER"] = df["NOTE_TEXT"].str.lower()
-    df["NOTE_LENGTH"] = df["NOTE_TEXT"].str.len().fillna(0).astype(int)
+    grouped = df.groupby(key_cols, dropna=False)
 
-    # Build one-line lab description for each row (may be empty)
-    df["LAB_ENTRY"] = df.apply(build_lab_entry, axis=1)
-    df["HAS_LAB_ENTRY"] = df["LAB_ENTRY"].str.len() > 0
+    rows = []
 
-    # Grouping keys to identify one clinical pharmacist note
-    group_keys = [
-        "MRN",
-        "Document_Number",
-        "DOCUMENT_TYPE",
-        "Entry_Date",
-        "Visit",
-        "VISIT_LOCATION",
-        "SERVICE",
-        "Parent_Number",
-        "Parent_Type",
-        "HOSPITAL_LOCATION",
-        "AUTHOR_SERVICE",
-        "Visit_Number",
-        "Has_Clinical_Recommendation",
-        "NOTE_TEXT",
-    ]
+    for key, group in grouped:
+        mrn, doc_no, entry_date, visit_no, note = key
 
-    # Aggregate labs per note
-    def agg_labs(sub: pd.DataFrame) -> pd.Series:
-        # Keep only non-empty lab entries
-        labs = [x for x in sub["LAB_ENTRY"].tolist() if x]
-        labs_text = " || ".join(labs) if labs else ""
-        num_labs = len(labs)
+        base_row = {
+            "MRN": mrn,
+            "Document_Number": doc_no,
+            "Entry_Date": entry_date,
+            "Visit_Number": visit_no,
+            "VISIT_LOCATION": group.iloc[0].get("VISIT_LOCATION"),
+            "SERVICE": group.iloc[0].get("SERVICE"),
+            "HOSPITAL_LOCATION": group.iloc[0].get("HOSPITAL_LOCATION"),
+            "AUTHOR_SERVICE": group.iloc[0].get("AUTHOR_SERVICE"),
+            "Has_Clinical_Recommendation": group.iloc[0].get("Has_Clinical_Recommendation"),
+            "Note": normalize(note),
+        }
 
-        # For now, simple flags; you can refine later
-        has_labs = num_labs > 0
+        # Lab features
+        lab_features = extract_labs_for_group(group)
 
-        # Derived from NOTE_LOWER (same for all rows in the group)
-        note_lower = sub["NOTE_LOWER"].iloc[0]
+        # Text-derived clinical features
+        bsa = extract_bsa(note)
+        cycle = extract_cycle(note)
+        ecog = extract_ecog(note)
+        chemo = extract_drugs(note, CHEMO_DRUGS)
+        supportive = extract_drugs(note, SUPPORTIVE_DRUGS)
+        comorbid = extract_comorbidities(note)
 
-        bsa = extract_bsa(note_lower)
-        cycle = extract_cycle(note_lower)
-        chemo_meds = find_keywords(note_lower, CHEMO_DRUGS)
-        comorbidities = find_keywords(note_lower, COMORBIDITY_KEYWORDS)
+        text_features = {
+            "BSA_m2": bsa,
+            "Cycle_Number": cycle,
+            "ECOG_Performance": ecog,
+            "Chemo_Drugs_In_Note": chemo,
+            "Supportive_Meds_In_Note": supportive,
+            "Comorbidities_In_Note": comorbid,
+        }
 
-        return pd.Series(
-            {
-                "LABS_TEXT": labs_text,
-                "NUM_LABS": num_labs,
-                "HAS_LABS": has_labs,
-                "NOTE_LOWER": note_lower,
-                "BSA_EXTRACTED": bsa,
-                "CYCLE_INFO": cycle,
-                "CHEMO_MEDS": chemo_meds,
-                "COMORBIDITIES": comorbidities,
-            }
-        )
+        merged_row = {**base_row, **lab_features, **text_features}
+        rows.append(merged_row)
 
-    grouped = df.groupby(group_keys, dropna=False, as_index=False).apply(agg_labs)
+    out_df = pd.DataFrame(rows)
 
-    # After groupby+apply, pandas creates a MultiIndex; reset it
-    if isinstance(grouped.index, pd.MultiIndex):
-        grouped.reset_index(drop=True, inplace=True)
-
-    # Order columns nicely
-    col_order = (
-        group_keys
-        + [
-            "NOTE_LOWER",
-            "NOTE_LENGTH",
-            "HAS_LABS",
-            "NUM_LABS",
-            "LABS_TEXT",
-            "BSA_EXTRACTED",
-            "CYCLE_INFO",
-            "CHEMO_MEDS",
-            "COMORBIDITIES",
-        ]
-    )
-
-    # NOTE_LENGTH is not created inside agg_labs; add from original
-    # Map NOTE_LENGTH from original df (same per note)
-    note_len_map = (
-        df.drop_duplicates(subset=group_keys)[group_keys + ["NOTE_LENGTH"]]
-        .set_index(group_keys)["NOTE_LENGTH"]
-    )
-    grouped["NOTE_LENGTH"] = grouped.set_index(group_keys).index.map(note_len_map)
-
-    # Ensure all columns exist
-    for c in col_order:
-        if c not in grouped.columns:
-            grouped[c] = ""
-
-    grouped = grouped[col_order]
-
-    print(f"Preprocessed rows (one per note): {len(grouped)}")
-    print(f"Saving to: {OUTPUT_FILE}")
-
-    grouped.to_excel(OUTPUT_FILE, index=False)
-
-    print("Done. Preprocessed file written successfully.")
+    out_df.to_excel(output_path, index=False)
+    print(f"Saved preprocessed data to: {output_path}")
 
 
 if __name__ == "__main__":
