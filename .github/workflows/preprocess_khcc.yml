@@ -21,21 +21,69 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas openpyxl
 
-      - name: Run preprocessing script
+            - name: Run preprocessing script
         run: |
           python << 'EOF'
           import pandas as pd
+          import re
 
-          # 1) Load your Excel file from the repo root
+          # 1) Load original file
           df = pd.read_excel("merged_labs_pharmacy.xlsx")
 
-          # 2) Basic cleaning – you can expand this later
-          df["Note"] = df["Note"].astype(str).str.strip()
+          # 2) Keep only rows with non-empty notes
+          df = df[df["Note"].notna() & (df["Note"].astype(str).str.strip() != "")]
 
-          # 3) Save preprocessed file
+          # 3) (Optional) keep only rows with clinical recommendations = Yes
+          if "Has_Clinical_Recommendation" in df.columns:
+              df = df[df["Has_Clinical_Recommendation"].astype(str).str.upper() == "YES"]
+
+          # 4) Standardize date columns
+          date_cols = ["Entry_Date", "DATE/TIME SPECIMEN TAKEN", "DATE REPORT COMPLETED"]
+          for col in date_cols:
+              if col in df.columns:
+                  df[col] = pd.to_datetime(df[col], errors="coerce")
+
+          # Recalculate date_diff_days if both dates exist
+          if "DATE/TIME SPECIMEN TAKEN" in df.columns and "DATE REPORT COMPLETED" in df.columns:
+              df["date_diff_days"] = (
+                  df["DATE REPORT COMPLETED"] - df["DATE/TIME SPECIMEN TAKEN"]
+              ).dt.days
+
+          # 5) Clean the clinical pharmacist note text
+          def clean_text(text: str) -> str:
+              text = str(text)
+              text = text.replace("\r", " ").replace("\n", " ")
+              text = re.sub(r"\s+", " ", text)  # collapse multiple spaces
+              return text.strip()
+
+          df["note_clean"] = df["Note"].apply(clean_text)
+
+          # 6) Simple text features
+          df["note_len_chars"] = df["note_clean"].str.len()
+          df["note_len_words"] = df["note_clean"].str.split().str.len()
+
+          # 7) Very simple keyword flags
+          def contains(pattern, text):
+              return bool(re.search(pattern, str(text), flags=re.IGNORECASE))
+
+          df["has_dose_change"] = df["note_clean"].apply(
+              lambda x: contains(r"\bdose\b|\bmg\b|\bml\b|increase|decrease|reduce", x)
+          )
+          df["has_start_stop"] = df["note_clean"].apply(
+              lambda x: contains(r"\bstart\b|initiat|stop\b|discontinu", x)
+          )
+          df["has_interaction"] = df["note_clean"].apply(
+              lambda x: contains(r"interaction|contraindicat", x)
+          )
+          df["has_monitoring_plan"] = df["note_clean"].apply(
+              lambda x: contains(r"monitor|follow[- ]?up|recheck|repeat", x)
+          )
+
+          # 8) Save preprocessed file
           df.to_excel("khcc_preprocessed.xlsx", index=False)
-          print("Saved khcc_preprocessed.xlsx with", len(df), "rows")
+          print("Saved khcc_preprocessed.xlsx with", len(df), "rows and", len(df.columns), "columns.")
           EOF
+
 
       - name: Upload preprocessed file
         uses: actions/upload-artifact@v4
