@@ -1,33 +1,43 @@
 # scripts/generate_ai_notes.py
-# v2 — tidy outputs, stronger prompts, robust per-model logging, configurable CADSS roles
+# KHCC cases → AI clinical pharmacist notes (GPT / Claude / DeepSeek / CADSS)
+# One row per Case_ID, columns:
+# Case_ID | OpenAI_Note | Claude_Note | DeepSeek_Note | CADSS_Note | Original_Note
 
 import os
-import json
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple
 
 import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 from dotenv import load_dotenv
 
-# -----------------------------
-# Load env/config
-# -----------------------------
+# -------------------------------------------------
+# Load env / configuration
+# -------------------------------------------------
 load_dotenv()
 
-INPUT_EXCEL  = os.getenv("INPUT_EXCEL", "synthetic_breast_cancer_1000.xlsx")
-INPUT_SHEET  = os.getenv("INPUT_SHEET", "Sheet1")   # << you said your sheet is Sheet1
+# Input table (your khcc_cases_200.xlsx)
+INPUT_EXCEL  = os.getenv("INPUT_EXCEL", "khcc_cases_200.xlsx")
+# None = first sheet
+INPUT_SHEET  = os.getenv("INPUT_SHEET", None)
+
 OUT_DIR      = Path(os.getenv("OUT_DIR", "outputs"))
-OUT_FILE     = OUT_DIR / "AI_Recommendations.csv"
-SOURCES      = [s.strip() for s in os.getenv("SOURCES", "gpt,claude,deepseek,cadss").split(",") if s.strip()]
+OUT_FILE     = OUT_DIR / os.getenv("OUT_FILE", "KHCC_AI_Notes.xlsx")
+
+# Which sources to run (comma-separated: gpt,claude,deepseek,cadss)
+SOURCES      = [
+    s.strip()
+    for s in os.getenv("SOURCES", "gpt,claude,deepseek,cadss").split(",")
+    if s.strip()
+]
 
 # pacing & limits
 ROW_LIMIT        = int(os.getenv("ROW_LIMIT", "0") or "0")  # 0 = all rows
 PER_CASE_SLEEP   = float(os.getenv("PER_CASE_SLEEP", "0.2"))
 
-# temps
+# temperatures
 GEN_TEMPERATURE  = float(os.getenv("GEN_TEMPERATURE", "0.2"))
 REV_TEMPERATURE  = float(os.getenv("REV_TEMPERATURE", "0.4"))
 SYN_TEMPERATURE  = float(os.getenv("SYN_TEMPERATURE", "0.2"))
@@ -38,145 +48,200 @@ CLAUDE_MODEL     = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20240620")
 DEEPSEEK_MODEL   = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_R       = os.getenv("DEEPSEEK_R", "deepseek-reasoner")
 
-# CADSS role routing (change in workflow env to A/B test)
+# CADSS roles
 CADSS_GENERATOR  = os.getenv("CADSS_GENERATOR", "gpt")       # gpt|claude|deepseek
 CADSS_REVIEWER   = os.getenv("CADSS_REVIEWER",  "deepseek")  # gpt|claude|deepseek
 CADSS_SYNTH      = os.getenv("CADSS_SYNTH",     "claude")    # claude|gpt|deepseek
 
-# -----------------------------
-# SDK clients
-# -----------------------------
-# OpenAI
+# -------------------------------------------------
+# API clients
+# -------------------------------------------------
 from openai import OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 oai = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# Anthropic
 import anthropic
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ac = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
-# DeepSeek (OpenAI-compatible endpoint)
 import httpx
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE    = os.getenv("DEEPSEEK_BASE", "https://api.deepseek.com")
 
+# -------------------------------------------------
+# Prompt configuration
+# -------------------------------------------------
 
-# -----------------------------
-# Output schema (tidy; one row per case×source)
-# -----------------------------
-OUTPUT_COLS = [
+# Columns we DO NOT send to the models
+EXCLUDED_FOR_PROMPT = {
+    "Case_ID",
     "case_id",
-    "diagnosis_subtype",
-    "regimen",
-    "source_key",          # gpt|claude|deepseek|cadss
-    "stage",               # generator|reviewer|synthesizer
-    "model_id",
-    "temperature",
-    "status",              # ok|error
-    "error_message",
-    "recommendation_text", # final text or draft
-    "review_json",         # JSON string only for reviewer rows
-    "created_at_utc",
-]
+    "Note",                  # original pharmacist note
+    "Note_Original",
+    "Original_Note",
+    "Recommendations_Only",
+    # any AI outputs if they exist in the file
+    "OpenAI_Note",
+    "Claude_Note",
+    "DeepSeek_Note",
+    "CADSS_Note",
+}
 
-def append_record(records: List[dict], row: pd.Series, *,
-                  source_key: str,
-                  stage: str,
-                  model_id: str,
-                  temperature: float,
-                  status: str = "ok",
-                  error_message: str = "",
-                  recommendation_text: str = "",
-                  review_json: str = "") -> None:
-    records.append({
-        "case_id": row.get("case_id"),
-        "diagnosis_subtype": row.get("diagnosis_subtype"),
-        "regimen": row.get("regimen"),
-        "source_key": source_key,
-        "stage": stage,
-        "model_id": model_id,
+# Safety limit on extremely long notes
+MAX_NOTE_LEN = int(os.getenv("MAX_NOTE_LEN", "2500") or "2500")
+
+
+# -------------------------------------------------
+# Low-level model callers (with retry)
+# -------------------------------------------------
+@retry(stop=stop_after_attempt(5), wait=wait_exponential_jitter(1, 4))
+def call_gpt_text(prompt: str, temperature: float = 0.2) -> str:
+    if not oai:
+        raise RuntimeError("OpenAI client not configured (OPENAI_API_KEY missing)")
+    r = oai.chat.completions.create(
+        model=GPT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+    )
+    return r.choices[0].message.content.strip()
+
+
+@retry(stop=stop_after_attempt(5), wait=wait_exponential_jitter(1, 4))
+def call_claude_text(prompt: str, temperature: float = 0.2) -> str:
+    if not ac:
+        raise RuntimeError("Anthropic client not configured (ANTHROPIC_API_KEY missing)")
+    r = ac.messages.create(
+        model=CLAUDE_MODEL,
+        temperature=temperature,
+        max_tokens=1800,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return r.content[0].text.strip()
+
+
+@retry(stop=stop_after_attempt(5), wait=wait_exponential_jitter(1, 4))
+def call_deepseek_text(prompt: str, model: str, temperature: float = 0.2) -> str:
+    if not DEEPSEEK_API_KEY:
+        raise RuntimeError("DeepSeek key not configured (DEEPSEEK_API_KEY missing)")
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
-        "status": status,
-        "error_message": (error_message or "")[:500],
-        "recommendation_text": recommendation_text,
-        "review_json": review_json,
-        "created_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-    })
+    }
+    with httpx.Client(base_url=DEEPSEEK_BASE, timeout=120) as client:
+        resp = client.post("/chat/completions", headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    return data["choices"][0]["message"]["content"].strip()
 
 
-# -----------------------------
-# Stronger prompts
-# -----------------------------
+# -------------------------------------------------
+# Prompt builders
+# -------------------------------------------------
 def build_case_prompt(row: pd.Series) -> str:
-    return f"""You are a clinical oncology pharmacist at a tertiary cancer center (KHCC).
+    """Builds the clinical context for ONE case using all non-excluded columns,
+    including Note_Without_Recommendations.
+    """
+    case_id = row.get("Case_ID") or row.get("case_id") or ""
 
-## Patient Summary
-- Diagnosis/Subtype: {row.get('diagnosis_subtype')}
-- Regimen / Cycle: {row.get('regimen')} / {row.get('cycle')}
-- BSA (m²): {row.get('bsa')}
-- Cardiac (LVEF%): {row.get('lvef')}
-- Renal (CrCl, mL/min): {row.get('crcl')}
-- Hepatic (AST/ALT/Tbili): {row.get('ast')}/{row.get('alt')}/{row.get('tbil')}
-- Comorbidities: {row.get('comorbidities')}
-- Current Medications: {row.get('meds')}
+    lines: list[str] = []
+    lines.append("You are a clinical oncology pharmacist at King Hussein Cancer Center (KHCC).")
+    lines.append("")
+    if case_id:
+        lines.append(f"Case ID: {case_id}")
+    lines.append(
+        "Use the anonymized patient data below to write a single, comprehensive "
+        "clinical pharmacist note (assessment + recommendations)."
+    )
+    lines.append("The note should:")
+    lines.append("- Summarize the clinical situation and key problems.")
+    lines.append("- Evaluate chemotherapy regimen, doses, labs, comorbidities and co-medications.")
+    lines.append("- State clear pharmacist recommendations (dose changes, holds, supportive care, monitoring).")
+    lines.append("- Follow KHCC documentation style and NEVER mention that you are an AI model.")
+    lines.append("")
+    lines.append("=== Structured and semi-structured data ===")
 
-## Task
-Return a pharmacist recommendation **in the exact layout below**. Be specific, numeric, and concise. If data are missing, state the assumption explicitly and proceed with a safe, conservative plan.
+    for col, val in row.items():
+        if col in EXCLUDED_FOR_PROMPT:
+            continue
+        if pd.isna(val):
+            continue
+        text = str(val).strip()
+        if not text:
+            continue
 
-### 1) Dose Verification / Adjustment
-- For **each drug** in the regimen, provide a row with:
-  Drug | Ordered dose (mg/m² or mg) | Calculated dose (mg) | Basis (BSA/renal/hepatic) | Adjustment (Y/N) | Rationale
+        # special handling for the long free-text assessment
+        if col == "Note_Without_Recommendations" and len(text) > MAX_NOTE_LEN:
+            text = text[:MAX_NOTE_LEN] + "… [truncated]"
 
-### 2) Interaction & Contraindication Check
-- Bullet list: each item = Interaction/Issue | Clinical relevance | Action.
+        lines.append(f"- {col}: {text}")
 
-### 3) Safety Considerations (Breast Cancer–specific)
-- Cardiac risks (anthracyclines, HER2 agents), hepatic/renal flags, myelosuppression thresholds. Reference **LVEF**, **CrCl**, **AST/ALT/Tbili** against safe use thresholds.
+    lines.append("")
+    lines.append(
+        "Now write the clinical pharmacist note in free-text form as you would document in the KHCC system. "
+        "Include both assessment and recommendations inside one continuous note."
+    )
+    return "\n".join(lines)
 
-### 4) Supportive Care / Premedication
-- Antiemetic regimen (by emetogenicity), growth factors (if indicated), HER2 infusion premeds (if needed), cardioprotection (if indicated).
 
-### 5) Monitoring & Follow-Up
-- Labs (timing/thresholds), ECHO/MUGA schedule (if HER2/anthracycline), toxicity monitoring, hold/reduce rules.
+def safety_gate(note: str, row: pd.Series) -> Tuple[bool, str]:
+    """Very small safety sanity-check. Flags obvious red situations but never blocks generation."""
+    reasons = []
 
-### 6) Final Plan (Brief)
-- 3–6 lines summarizing go/hold, any dose changes, key monitoring, patient counseling points.
+    # try to read LVEF from any reasonable column name
+    lvef_val = None
+    for c in ("LVEF_percent", "lvef", "LVEF"):
+        if c in row.index and pd.notna(row[c]):
+            try:
+                lvef_val = float(row[c])
+                break
+            except Exception:
+                continue
 
-**Constraints**
-- No PHI, no model names, no references list.
-- Follow KHCC-style clinical documentation and safe practice defaults.
-"""
+    if "trastuzumab" in note.lower() and (lvef_val is None or lvef_val < 50):
+        reasons.append("HER2 therapy mentioned with LVEF <50% or missing.")
+    if any(w in note.lower() for w in ["double dose", "tripled dose"]):
+        reasons.append("Suspicious dose wording (double/triple dose).")
+
+    return (len(reasons) == 0, "; ".join(reasons))
+
 
 def build_review_prompt(case_prompt: str, draft_note: str) -> str:
+    """Prompt for the CADSS reviewer."""
     return f"""Role: Clinical safety reviewer and protocol auditor (KHCC).
 
-Case:
+Case (summary):
 {case_prompt}
 
-Draft to review:
+Draft clinical pharmacist note:
 \"\"\"{draft_note}\"\"\"
 
-Return **strict JSON** with keys exactly:
+Return STRICT JSON with keys:
 - "issues": [{{"type":"dose|interaction|safety|monitoring|completeness|protocol","detail":"..."}}]
-- "required_changes": ["..."],  // imperative, one change per bullet
+- "required_changes": ["..."],
 - "pcne_summary": {{
-    "problems":["P1.2","P2.2",...],
-    "causes":["C2.1","C9.1",...],
-    "interventions":["I1.2","I3.1",...],
-    "outcomes":["O1","O0",...]
+    "problems": ["P1.2","P2.2"],
+    "causes": ["C2.1","C9.1"],
+    "interventions": ["I1.2","I3.1"],
+    "outcomes": ["O1","O0"]
   }}
 
 Rules:
-- Focus on **concrete** errors/omissions and KHCC protocol adherence.
-- If the draft is safe and complete, "issues" should be empty and "required_changes"=["No change"].
-- Output JSON only.
+- Focus on concrete errors/omissions and KHCC protocol adherence.
+- If the draft is safe and complete, issues = [] and required_changes = ["No change"].
+- Output JSON only (no explanations outside JSON).
 """
 
-def build_synthesis_prompt(case_prompt: str, draft_note: str, critique_json: str) -> str:
-    return f"""Role: Pharmacist synthesizer. Produce the **final KHCC-compliant note**.
 
-Case:
+def build_synthesis_prompt(case_prompt: str, draft_note: str, critique_json: str) -> str:
+    """Prompt for the CADSS synthesizer."""
+    return f"""Role: Pharmacist synthesizer. Produce the FINAL KHCC-compliant clinical pharmacist note.
+
+Case (summary):
 {case_prompt}
 
 Initial draft:
@@ -185,69 +250,13 @@ Initial draft:
 Reviewer critique (JSON):
 {critique_json}
 
-Apply **every** required_change if valid. Keep the exact six sections and concise style from the generator prompt. Do **not** include JSON or model names. Return the final note only.
+Write the final integrated note as free text (assessment + recommendations together).
+Apply all valid required_changes. Do NOT include JSON, section titles, or model names. Note only.
 """
 
 
-# -----------------------------
-# API callers with retry
-# -----------------------------
-@retry(stop=stop_after_attempt(5), wait=wait_exponential_jitter(1, 4))
-def call_gpt_text(prompt: str, temperature: float = 0.2) -> str:
-    if not oai:
-        raise RuntimeError("OpenAI client not configured")
-    r = oai.chat.completions.create(
-        model=GPT_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-    )
-    return r.choices[0].message.content.strip()
-
-@retry(stop=stop_after_attempt(5), wait=wait_exponential_jitter(1, 4))
-def call_claude_text(prompt: str, temperature: float = 0.2) -> str:
-    if not ac:
-        raise RuntimeError("Anthropic client not configured")
-    r = ac.messages.create(
-        model=CLAUDE_MODEL,
-        temperature=temperature,
-        max_tokens=1400,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return r.content[0].text.strip()
-
-@retry(stop=stop_after_attempt(5), wait=wait_exponential_jitter(1, 4))
-def call_deepseek_text(prompt: str, model: str, temperature: float = 0.2) -> str:
-    if not DEEPSEEK_API_KEY:
-        raise RuntimeError("DeepSeek key not configured")
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature}
-    with httpx.Client(base_url=DEEPSEEK_BASE, timeout=120) as client:
-        resp = client.post("/chat/completions", headers=headers, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-    return data["choices"][0]["message"]["content"].strip()
-
-
-# -----------------------------
-# Minimal safety post-process
-# -----------------------------
-def safety_gate(note: str, row: pd.Series) -> Tuple[bool, str]:
-    red = []
-    try:
-        lvef = float(row.get("lvef")) if str(row.get("lvef")).strip() not in ("", "None", "nan") else None
-    except Exception:
-        lvef = None
-    if "trastuzumab" in note.lower() and (lvef is None or lvef < 50):
-        red.append("HER2 therapy mentioned with LVEF <50% or missing value.")
-    if any(w in note.lower() for w in ["double dose", "tripled dose"]):
-        red.append("Suspicious dose language.")
-    return (len(red) == 0, "; ".join(red))
-
-
-# -----------------------------
-# CADSS orchestration (role-configurable)
-# -----------------------------
 def cadss_flow(case_prompt: str) -> Tuple[str, str]:
+    """Generator → Reviewer → Synthesizer flow, returning final note + provenance string."""
     # generator
     if CADSS_GENERATOR == "gpt":
         draft = call_gpt_text(case_prompt, GEN_TEMPERATURE)
@@ -283,119 +292,129 @@ def cadss_flow(case_prompt: str) -> Tuple[str, str]:
         final = call_deepseek_text(synth_prompt, DEEPSEEK_MODEL, SYN_TEMPERATURE)
         syn_model = DEEPSEEK_MODEL
 
-    # return final + a tiny provenance string
-    return final, f"{gen_model}|{rev_model}|{syn_model}"
+    provenance = f"{gen_model}|{rev_model}|{syn_model}"
+    return final, provenance
 
 
-# -----------------------------
+# -------------------------------------------------
 # Main
-# -----------------------------
+# -------------------------------------------------
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # read input table
+    # 1) Read input file
     if INPUT_EXCEL.lower().endswith(".xlsx"):
-        df = pd.read_excel(INPUT_EXCEL, sheet_name=INPUT_SHEET)
+        if INPUT_SHEET:
+            df = pd.read_excel(INPUT_EXCEL, sheet_name=INPUT_SHEET)
+        else:
+            df = pd.read_excel(INPUT_EXCEL)
     else:
         df = pd.read_csv(INPUT_EXCEL)
 
     if ROW_LIMIT and ROW_LIMIT > 0:
         df = df.head(ROW_LIMIT)
 
-    # make sure missing cols don't crash prompts
-    needed = ["case_id","diagnosis_subtype","regimen","cycle","bsa","lvef","crcl","ast","alt","tbil","comorbidities","meds"]
-    for c in needed:
-        if c not in df.columns:
-            df[c] = ""
+    # Make sure we have a lowercase case_id column for convenience
+    if "case_id" not in df.columns:
+        if "Case_ID" in df.columns:
+            df["case_id"] = df["Case_ID"]
+        else:
+            df["case_id"] = [f"Case {i+1}" for i in range(len(df))]
 
-    records: List[dict] = []
+    results = []
 
-    for i, row in df.iterrows():
+    # 2) Loop over cases
+    for _, row in df.iterrows():
+        case_id = row.get("Case_ID") or row.get("case_id")
+
+        # Try to recover original pharmacist note from any reasonable column name
+        original_note = (
+            row.get("Note")
+            or row.get("Original_Note")
+            or row.get("Note_Original")
+            or ""
+        )
+
+        out_row = {
+            "Case_ID": case_id,
+            "OpenAI_Note": "",
+            "Claude_Note": "",
+            "DeepSeek_Note": "",
+            "CADSS_Note": "",
+            "Original_Note": original_note,
+        }
+
         case_prompt = build_case_prompt(row)
 
-        # GPT generator
+        # ---- GPT (OpenAI) ----
         if "gpt" in SOURCES:
             try:
-                note = call_gpt_text(case_prompt, temperature=GEN_TEMPERATURE)
+                note = call_gpt_text(case_prompt, GEN_TEMPERATURE)
                 ok, why = safety_gate(note, row)
-                append_record(records, row,
-                    source_key="gpt", stage="generator", model_id=GPT_MODEL,
-                    temperature=GEN_TEMPERATURE,
-                    status="ok" if ok else "error",
-                    error_message="" if ok else f"SafetyGate: {why}",
-                    recommendation_text=note
-                )
+                if ok:
+                    out_row["OpenAI_Note"] = note
+                else:
+                    out_row["OpenAI_Note"] = f"[SAFETY FLAG] {why}\n\n{note}"
             except Exception as e:
-                append_record(records, row,
-                    source_key="gpt", stage="generator", model_id=GPT_MODEL,
-                    temperature=GEN_TEMPERATURE,
-                    status="error", error_message=str(e)
-                )
+                out_row["OpenAI_Note"] = f"[ERROR] {e}"
 
-        # Claude generator
+        # ---- Claude ----
         if "claude" in SOURCES:
             try:
-                note = call_claude_text(case_prompt, temperature=GEN_TEMPERATURE)
+                note = call_claude_text(case_prompt, GEN_TEMPERATURE)
                 ok, why = safety_gate(note, row)
-                append_record(records, row,
-                    source_key="claude", stage="generator", model_id=CLAUDE_MODEL,
-                    temperature=GEN_TEMPERATURE,
-                    status="ok" if ok else "error",
-                    error_message="" if ok else f"SafetyGate: {why}",
-                    recommendation_text=note
-                )
+                if ok:
+                    out_row["Claude_Note"] = note
+                else:
+                    out_row["Claude_Note"] = f"[SAFETY FLAG] {why}\n\n{note}"
             except Exception as e:
-                append_record(records, row,
-                    source_key="claude", stage="generator", model_id=CLAUDE_MODEL,
-                    temperature=GEN_TEMPERATURE,
-                    status="error", error_message=str(e)
-                )
+                out_row["Claude_Note"] = f"[ERROR] {e}"
 
-        # DeepSeek generator
+        # ---- DeepSeek ----
         if "deepseek" in SOURCES:
             try:
-                note = call_deepseek_text(case_prompt, model=DEEPSEEK_MODEL, temperature=GEN_TEMPERATURE)
+                note = call_deepseek_text(case_prompt, DEEPSEEK_MODEL, GEN_TEMPERATURE)
                 ok, why = safety_gate(note, row)
-                append_record(records, row,
-                    source_key="deepseek", stage="generator", model_id=DEEPSEEK_MODEL,
-                    temperature=GEN_TEMPERATURE,
-                    status="ok" if ok else "error",
-                    error_message="" if ok else f"SafetyGate: {why}",
-                    recommendation_text=note
-                )
+                if ok:
+                    out_row["DeepSeek_Note"] = note
+                else:
+                    out_row["DeepSeek_Note"] = f"[SAFETY FLAG] {why}\n\n{note}"
             except Exception as e:
-                append_record(records, row,
-                    source_key="deepseek", stage="generator", model_id=DEEPSEEK_MODEL,
-                    temperature=GEN_TEMPERATURE,
-                    status="error", error_message=str(e)
-                )
+                out_row["DeepSeek_Note"] = f"[ERROR] {e}"
 
-        # CADSS pipeline (generator → reviewer → synthesizer)
+        # ---- CADSS (multi-agent) ----
         if "cadss" in SOURCES:
             try:
                 final_note, provenance = cadss_flow(case_prompt)
                 ok, why = safety_gate(final_note, row)
-                append_record(records, row,
-                    source_key="cadss", stage="synthesizer", model_id=provenance,
-                    temperature=SYN_TEMPERATURE,
-                    status="ok" if ok else "error",
-                    error_message="" if ok else f"SafetyGate: {why}",
-                    recommendation_text=final_note
-                )
+                if ok:
+                    out_row["CADSS_Note"] = final_note
+                else:
+                    out_row["CADSS_Note"] = (
+                        f"[SAFETY FLAG] {why} (models: {provenance})\n\n{final_note}"
+                    )
             except Exception as e:
-                append_record(records, row,
-                    source_key="cadss", stage="synthesizer",
-                    model_id=f"{CADSS_GENERATOR}|{CADSS_REVIEWER}|{CADSS_SYNTH}",
-                    temperature=SYN_TEMPERATURE,
-                    status="error", error_message=str(e)
-                )
+                out_row["CADSS_Note"] = f"[ERROR] {e}"
+
+        results.append(out_row)
 
         # gentle pacing to avoid rate limits
         time.sleep(PER_CASE_SLEEP)
 
-    # write tidy CSV in guaranteed column order
-    pd.DataFrame(records, columns=OUTPUT_COLS).to_csv(OUT_FILE, index=False)
-    print(f"Saved {len(records)} rows to {OUT_FILE}")
+    # 3) Save output as Excel
+    out_df = pd.DataFrame(
+        results,
+        columns=[
+            "Case_ID",
+            "OpenAI_Note",
+            "Claude_Note",
+            "DeepSeek_Note",
+            "CADSS_Note",
+            "Original_Note",
+        ],
+    )
+    out_df.to_excel(OUT_FILE, index=False)
+    print(f"Saved {len(out_df)} cases to {OUT_FILE}")
 
 
 if __name__ == "__main__":
