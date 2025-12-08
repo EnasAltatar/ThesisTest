@@ -1,12 +1,12 @@
-name: Run AI Note Generation (First 500)
+name: Run KHCC AI Note Generation (All Cases)
 
 on:
-  workflow_dispatch:  # manual run
+  workflow_dispatch:  # manual run from GitHub UI
 
 jobs:
-  run-500:
+  run-khcc:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # max allowed
+    timeout-minutes: 360  # enough time for all 200 cases
 
     env:
       # === API Keys (from repo Secrets) ===
@@ -16,34 +16,33 @@ jobs:
 
       # === Models & Roles ===
       GPT_MODEL: gpt-4o-mini
-      # Use rolling alias to avoid deprecation warnings
       CLAUDE_MODEL: claude-3-5-sonnet-latest
       DEEPSEEK_MODEL: deepseek-chat
       DEEPSEEK_R: deepseek-reasoner
 
-      # CADSS role routing (easy to A/B without code changes)
+      # CADSS role routing
       CADSS_GENERATOR: gpt       # gpt | claude | deepseek
       CADSS_REVIEWER: deepseek   # gpt | claude | deepseek
       CADSS_SYNTH: claude        # claude | gpt | deepseek
 
       # === Input / Output ===
-      INPUT_EXCEL: synthetic_breast_cancer_1000.xlsx
+      INPUT_EXCEL: khcc_cases_200.xlsx
+      # set to your actual sheet name, or leave empty if first sheet is correct
       INPUT_SHEET: Sheet1
       OUT_DIR: outputs
+      OUT_FILE: KHCC_AI_Notes.xlsx
+
+      # Which sources to run
       SOURCES: gpt,claude,deepseek,cadss
 
-      # === Run just the first 500 rows ===
-      START_ROW: 0
-      ROW_LIMIT: 500
-      PER_CASE_SLEEP: 0.5
+      # === Process all rows ===
+      ROW_LIMIT: 0          # 0 = all rows
+      PER_CASE_SLEEP: 0.5   # seconds between cases (avoid rate limits)
 
-      # Temperatures (stable but not flat)
+      # Temperatures
       GEN_TEMPERATURE: "0.2"
       REV_TEMPERATURE: "0.3"
       SYN_TEMPERATURE: "0.2"
-
-      # Safe resume: skip cases already present in outputs/AI_Recommendations.csv
-      SKIP_COMPLETED: "true"
 
     steps:
       - name: Checkout repository
@@ -61,51 +60,26 @@ jobs:
           pip install -r requirements.txt || true
           pip install openai anthropic httpx pandas openpyxl python-dotenv tenacity
           echo ">>> Installed packages:"
-          pip list | grep -E "openai|anthropic|httpx|pandas|openpyxl|tenacity|python-dotenv"
+          pip list | grep -E "openai|anthropic|httpx|pandas|openpyxl|tenacity|python-dotenv" || true
 
       - name: Check Excel sheet names
         run: |
           python - << 'PY'
           import openpyxl
-          wb = openpyxl.load_workbook("synthetic_breast_cancer_1000.xlsx", read_only=True)
+          wb = openpyxl.load_workbook("khcc_cases_200.xlsx", read_only=True)
           print("Sheet names:", wb.sheetnames)
           PY
 
-      - name: Run generator (first 500)
+      - name: Run AI note generator on KHCC cases
         run: |
-          echo ">>> Running generator for rows $START_ROW..$((START_ROW+ROW_LIMIT-1))"
+          echo ">>> Running generate_ai_notes.py on khcc_cases_200.xlsx ..."
           python scripts/generate_ai_notes.py
           echo ">>> Generator completed."
           echo ">>> Listing outputs/"
           ls -la "$OUT_DIR" || true
 
-      - name: Upload generated outputs (raw)
+      - name: Upload generated outputs
         uses: actions/upload-artifact@v4
         with:
-          name: ai_outputs_0_499
+          name: khcc_ai_notes_all
           path: outputs/
-
-      - name: Prepare cleanup input
-        run: |
-          if [ -f "outputs/AI_Recommendations.csv" ]; then
-            cp "outputs/AI_Recommendations.csv" "AI RECOMMENDATIONS.csv"
-          else
-            echo "WARNING: outputs/AI_Recommendations.csv not found. Listing files:"
-            ls -la outputs || true
-            exit 1
-          fi
-
-      - name: Run cleanup script
-        run: |
-          echo ">>> Running cleanup..."
-          python scripts/cleanup_ai_recommendations.py
-          echo ">>> Cleanup finished."
-          mkdir -p outputs
-          mv -f "AI_RECOMMENDATIONS_CLEAN.csv" "outputs/AI_RECOMMENDATIONS_CLEAN_0_499.csv" || true
-          ls -la outputs || true
-
-      - name: Upload cleaned CSV
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai_outputs_clean_0_499
-          path: outputs/AI_RECOMMENDATIONS_CLEAN_0_499.csv
