@@ -1,85 +1,32 @@
-name: Run KHCC AI Note Generation (All Cases)
+env:
+  # === API Keys ===
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
-on:
-  workflow_dispatch:  # manual run from GitHub UI
+  # === Models ===
+  GPT_MODEL: gpt-4o-mini
+  CLAUDE_MODEL: claude-3-5-sonnet-latest
+  DEEPSEEK_MODEL: deepseek-chat
+  DEEPSEEK_R: deepseek-reasoner
 
-jobs:
-  run-khcc:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360  # enough time for all 200 cases
+  # === CADSS routing ===
+  CADSS_GENERATOR: gpt        # generator: GPT
+  CADSS_REVIEWER: deepseek    # reviewer: DeepSeek reasoner
+  CADSS_SYNTH: claude         # synthesizer: Claude
 
-    env:
-      # === API Keys (from repo Secrets) ===
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+  # === Input / Output ===
+  INPUT_EXCEL: khcc_cases_200.xlsx
+  INPUT_SHEET: Sheet1
+  OUT_DIR: outputs
+  OUT_FILE: KHCC_AI_Notes.xlsx
+  SOURCES: gpt,claude,deepseek,cadss
 
-      # === Models & Roles ===
-      GPT_MODEL: gpt-4o-mini
-      CLAUDE_MODEL: claude-3-5-sonnet-latest
-      DEEPSEEK_MODEL: deepseek-chat
-      DEEPSEEK_R: deepseek-reasoner
+  # === Limit to first 50 cases ===
+  ROW_LIMIT: 50        # <- this is the key change
+  PER_CASE_SLEEP: 0.6  # small pause between cases to reduce rate limits
 
-      # CADSS role routing
-      CADSS_GENERATOR: gpt       # gpt | claude | deepseek
-      CADSS_REVIEWER: deepseek   # gpt | claude | deepseek
-      CADSS_SYNTH: claude        # claude | gpt | deepseek
-
-      # === Input / Output ===
-      INPUT_EXCEL: khcc_cases_200.xlsx
-      # set to your actual sheet name, or leave empty if first sheet is correct
-      INPUT_SHEET: Sheet1
-      OUT_DIR: outputs
-      OUT_FILE: KHCC_AI_Notes.xlsx
-
-      # Which sources to run
-      SOURCES: gpt,claude,deepseek,cadss
-
-      # === Process all rows ===
-      ROW_LIMIT: 0          # 0 = all rows
-      PER_CASE_SLEEP: 0.5   # seconds between cases (avoid rate limits)
-
-      # Temperatures
-      GEN_TEMPERATURE: "0.2"
-      REV_TEMPERATURE: "0.3"
-      SYN_TEMPERATURE: "0.2"
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          echo ">>> Installing dependencies..."
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt || true
-          pip install openai anthropic httpx pandas openpyxl python-dotenv tenacity
-          echo ">>> Installed packages:"
-          pip list | grep -E "openai|anthropic|httpx|pandas|openpyxl|tenacity|python-dotenv" || true
-
-      - name: Check Excel sheet names
-        run: |
-          python - << 'PY'
-          import openpyxl
-          wb = openpyxl.load_workbook("khcc_cases_200.xlsx", read_only=True)
-          print("Sheet names:", wb.sheetnames)
-          PY
-
-      - name: Run AI note generator on KHCC cases
-        run: |
-          echo ">>> Running generate_ai_notes.py on khcc_cases_200.xlsx ..."
-          python scripts/generate_ai_notes.py
-          echo ">>> Generator completed."
-          echo ">>> Listing outputs/"
-          ls -la "$OUT_DIR" || true
-
-      - name: Upload generated outputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: khcc_ai_notes_all
-          path: outputs/
+  # Temperatures
+  GEN_TEMPERATURE: "0.2"
+  REV_TEMPERATURE: "0.3"
+  SYN_TEMPERATURE: "0.2"
