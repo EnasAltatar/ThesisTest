@@ -1,32 +1,82 @@
-env:
-  # === API Keys ===
-  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-  ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+name: Run AI Note Generation on KHCC Cases
 
-  # === Models ===
-  GPT_MODEL: gpt-4o-mini
-  CLAUDE_MODEL: claude-3-5-sonnet-latest
-  DEEPSEEK_MODEL: deepseek-chat
-  DEEPSEEK_R: deepseek-reasoner
+on:
+  workflow_dispatch:
 
-  # === CADSS routing ===
-  CADSS_GENERATOR: gpt        # generator: GPT
-  CADSS_REVIEWER: deepseek    # reviewer: DeepSeek reasoner
-  CADSS_SYNTH: claude         # synthesizer: Claude
+jobs:
+  run-khcc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180   # 3 hours max
 
-  # === Input / Output ===
-  INPUT_EXCEL: khcc_cases_200.xlsx
-  INPUT_SHEET: Sheet1
-  OUT_DIR: outputs
-  OUT_FILE: KHCC_AI_Notes.xlsx
-  SOURCES: gpt,claude,deepseek,cadss
+    env:
+      # === API Keys ===
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
-  # === Limit to first 50 cases ===
-  ROW_LIMIT: 50        # <- this is the key change
-  PER_CASE_SLEEP: 0.6  # small pause between cases to reduce rate limits
+      # === Models ===
+      GPT_MODEL: gpt-4o-mini
+      CLAUDE_MODEL: claude-3-5-sonnet-latest
+      DEEPSEEK_MODEL: deepseek-chat
+      DEEPSEEK_R: deepseek-reasoner
 
-  # Temperatures
-  GEN_TEMPERATURE: "0.2"
-  REV_TEMPERATURE: "0.3"
-  SYN_TEMPERATURE: "0.2"
+      # === CADSS routing ===
+      CADSS_GENERATOR: gpt
+      CADSS_REVIEWER: deepseek
+      CADSS_SYNTH: claude
+
+      # === Input / Output ===
+      INPUT_EXCEL: khcc_cases_200.xlsx
+      INPUT_SHEET: Sheet1
+      OUT_DIR: outputs
+      OUT_FILE: KHCC_AI_Notes.xlsx
+
+      # Run only first 50 cases
+      ROW_LIMIT: 50
+      PER_CASE_SLEEP: 0.6
+
+      # Use all model sources
+      SOURCES: gpt,claude,deepseek,cadss
+
+      GEN_TEMPERATURE: "0.2"
+      REV_TEMPERATURE: "0.3"
+      SYN_TEMPERATURE: "0.2"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || true
+          pip install openai anthropic httpx pandas openpyxl python-dotenv tenacity
+
+      - name: Check Excel sheet names
+        run: |
+          python - << 'PY'
+          import os, openpyxl
+          fname = os.getenv("INPUT_EXCEL")
+          print("Opening:", fname)
+          wb = openpyxl.load_workbook(fname, read_only=True)
+          print("Sheets:", wb.sheetnames)
+          PY
+
+      - name: Run AI note generator on KHCC cases
+        run: |
+          echo ">>> Running generate_ai_notes.py ..."
+          python scripts/generate_ai_notes.py
+          echo ">>> Generation completed."
+          echo ">>> Listing outputs:"
+          ls -la outputs || true
+
+      - name: Upload generated outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: KHCC_AI_Notes
+          path: outputs/
