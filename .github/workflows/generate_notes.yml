@@ -1,43 +1,41 @@
-name: Run AI Note Generation on KHCC Cases
+name: Run AI Note Generation on KHCC cases
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # manual trigger
 
 jobs:
   run-khcc:
     runs-on: ubuntu-latest
-    timeout-minutes: 180   # 3 hours max
+    timeout-minutes: 360
 
     env:
-      # === API Keys ===
+      # === API Keys from repo secrets ===
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
       # === Models ===
       GPT_MODEL: gpt-4o-mini
-      CLAUDE_MODEL: claude-3-5-sonnet-latest
+      CLAUDE_MODEL: claude-3-5-sonnet-20240620
       DEEPSEEK_MODEL: deepseek-chat
       DEEPSEEK_R: deepseek-reasoner
 
       # === CADSS routing ===
-      CADSS_GENERATOR: gpt
-      CADSS_REVIEWER: deepseek
-      CADSS_SYNTH: claude
+      CADSS_GENERATOR: gpt       # gpt | claude | deepseek
+      CADSS_REVIEWER: deepseek   # gpt | claude | deepseek
+      CADSS_SYNTH: claude        # claude | gpt | deepseek
 
       # === Input / Output ===
       INPUT_EXCEL: khcc_cases_200.xlsx
       INPUT_SHEET: Sheet1
-      OUT_DIR: outputs
-      OUT_FILE: KHCC_AI_Notes.xlsx
-
-      # Run only first 50 cases
-      ROW_LIMIT: 50
-      PER_CASE_SLEEP: 0.6
-
-      # Use all model sources
+      OUT_DIR: outputs_khcc
       SOURCES: gpt,claude,deepseek,cadss
 
+      # === Limits (first 10 cases only) ===
+      ROW_LIMIT: 10
+      PER_CASE_SLEEP: 0.8
+
+      # Temperatures
       GEN_TEMPERATURE: "0.2"
       REV_TEMPERATURE: "0.3"
       SYN_TEMPERATURE: "0.2"
@@ -49,7 +47,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -60,23 +58,20 @@ jobs:
       - name: Check Excel sheet names
         run: |
           python - << 'PY'
-          import os, openpyxl
-          fname = os.getenv("INPUT_EXCEL")
-          print("Opening:", fname)
-          wb = openpyxl.load_workbook(fname, read_only=True)
-          print("Sheets:", wb.sheetnames)
+          import openpyxl
+          wb = openpyxl.load_workbook("khcc_cases_200.xlsx", read_only=True)
+          print("Sheet names:", wb.sheetnames)
           PY
 
-      - name: Run AI note generator on KHCC cases
+      - name: Run AI note generator on KHCC cases (first 10)
         run: |
-          echo ">>> Running generate_ai_notes.py ..."
+          echo ">>> Running generate_ai_notes.py on khcc_cases_200.xlsx (first 10 rows)..."
           python scripts/generate_ai_notes.py
-          echo ">>> Generation completed."
-          echo ">>> Listing outputs:"
-          ls -la outputs || true
+          echo ">>> Generator completed. Listing outputs:"
+          ls -la "$OUT_DIR" || true
 
       - name: Upload generated outputs
         uses: actions/upload-artifact@v4
         with:
-          name: KHCC_AI_Notes
-          path: outputs/
+          name: khcc_ai_notes_first_10
+          path: ${{ env.OUT_DIR }}/
