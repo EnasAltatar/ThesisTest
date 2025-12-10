@@ -1,5 +1,6 @@
-# Thesis Evaluation Tool — KHCC (Blinded, 5 notes A–E)
-# Run: streamlit run evaluation_app.py
+# evaluation_app.py
+# Thesis Evaluation Tool — KHCC (Blinded, 5 Notes)
+# Run with:  streamlit run evaluation_app.py
 
 import re
 import uuid
@@ -25,31 +26,31 @@ RUBRIC = {
     "Dose verification / adjustment": (
         0.18,
         "Protocol selection; BSA/CrCl/eGFR/Child-Pugh based dosing; adjustments "
-        "for age/organ function."
+        "for age/organ function.",
     ),
     "Interactions & contraindications": (
         0.18,
-        "Identifies & manages chemo/supportive/OTC/herbal DDIs; flags absolute/relative contraindications."
+        "Identifies & manages chemo/supportive/OTC/herbal interactions; flags absolute/relative contraindications.",
     ),
     "Safety & risk awareness": (
         0.16,
-        "Anticipates agent-specific toxicities (cardiotox, myelosuppression, hepatotox, neuropathy) & mitigation."
+        "Anticipates agent-specific toxicities (cardiotoxicity, myelosuppression, hepatotoxicity, neuropathy) & mitigation.",
     ),
     "Supportive care / premedication": (
         0.12,
-        "Antiemetics by emetogenicity; G-CSF criteria; TLS prevention; antimicrobial prophylaxis when indicated."
+        "Antiemetics by emetogenicity; G-CSF criteria; TLS prevention; antimicrobial prophylaxis when indicated.",
     ),
     "Monitoring & follow-up": (
         0.12,
-        "Labs/imaging schedule; thresholds to hold/adjust; timing windows for agent-specific risks."
+        "Labs/imaging schedule; thresholds to hold/adjust; timing windows for agent-specific risks.",
     ),
     "Guideline concordance": (
         0.14,
-        "Alignment with NCCN/ESMO/ASCO/institutional guidance; rationale is sound."
+        "Alignment with NCCN/ESMO/ASCO/institutional guidance; rationale is sound.",
     ),
     "Clarity & actionability": (
         0.10,
-        "Clear, prioritized, implementable plan with concise wording and no ambiguity."
+        "Clear, prioritized, implementable plan with concise wording and no ambiguity.",
     ),
 }
 
@@ -136,15 +137,14 @@ DEMO_CASES = pd.DataFrame(
         {
             "case_id": "DEMO-001",
             "patient_summary": "54F, ER+/HER2-, AC→T planned; eGFR 48 ml/min; LVEF 60%; HTN on amlodipine.",
-            "note_a": "Draft pharmacist recommendation (Note A)…",
-            "note_b": "Draft pharmacist recommendation (Note B)…",
-            "note_c": "Draft pharmacist recommendation (Note C)…",
-            "note_d": "Draft pharmacist recommendation (Note D)…",
-            "note_e": "Draft pharmacist recommendation (Note E)…",
+            "note_a": "Demo pharmacist recommendation (Note A)…",
+            "note_b": "Demo pharmacist recommendation (Note B)…",
+            "note_c": "Demo pharmacist recommendation (Note C)…",
+            "note_d": "Demo pharmacist recommendation (Note D)…",
+            "note_e": "Demo pharmacist recommendation (Note E)…",
         }
     ]
 )
-
 
 # -------------------
 # Session state init
@@ -159,7 +159,6 @@ def _init_state():
 
 
 _init_state()
-
 
 # -------------------
 # Helpers
@@ -182,14 +181,12 @@ def load_cases(upload) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = ""
 
-    # sanitize text
     df["case_id"] = df["case_id"].astype(str).str.strip()
     df["patient_summary"] = df["patient_summary"].astype(str)
 
     for col in ["note_a", "note_b", "note_c", "note_d", "note_e"]:
         df[col] = df[col].astype(str).apply(sanitize_note)
 
-    # keep only what we care about
     df = df[EXPECTED].copy()
     return df
 
@@ -204,7 +201,7 @@ def composite_score(scores: dict) -> float:
 
 def apply_flags(base: float, flags: list) -> float:
     penalty = sum(CRITICAL_FLAGS.get(f, 0) for f in flags)
-    penalty = min(penalty, 0.6)
+    penalty = min(penalty, 0.6)  # cap penalty
     return round(base * (1 - penalty), 2)
 
 
@@ -232,7 +229,7 @@ with st.sidebar:
         if len(st.session_state.cases):
             st.success(f"Loaded {len(st.session_state.cases)} rows.")
         else:
-            st.warning("No rows found; using Demo Cases instead.")
+            st.warning("No rows found; using demo data instead.")
 
     st.divider()
     st.caption(
@@ -244,9 +241,7 @@ with st.sidebar:
 # Main layout
 # -------------------
 st.title("Thesis Evaluation Tool — KHCC (Blinded, 5 Notes)")
-st.caption(
-    "Evaluating pharmacist-style recommendations for breast cancer chemotherapy."
-)
+st.caption("Evaluating pharmacist-style recommendations for breast cancer chemotherapy.")
 
 cases_df = (
     st.session_state.cases
@@ -255,9 +250,7 @@ cases_df = (
 )
 demo_mode = st.session_state.cases.empty
 if demo_mode:
-    st.info(
-        "Demo Mode: no file uploaded. Using sample cases for practice only."
-    )
+    st.info("Demo Mode: no file uploaded. Using sample data for practice only.")
 
 tab_home, tab_evaluate, tab_review, tab_export = st.tabs(
     ["🏠 Home", "📝 Evaluate", "🔎 Review", "⬇️ Export"]
@@ -273,9 +266,7 @@ with tab_home:
         st.markdown("**1) Pick a Case**\nSelect any case ID.")
         st.markdown("**2) Pick a Note**\nNotes are labeled **A–E**.")
     with c2:
-        st.markdown(
-            "**3) Score the note**\nUse the 7-dimension rubric (0–5 each)."
-        )
+        st.markdown("**3) Score the note**\nUse the 7-dimension rubric (0–5 each).")
         st.markdown("**4) Add safety flags**\nIf any critical issue exists.")
     with c3:
         st.markdown(
@@ -295,9 +286,7 @@ with tab_evaluate:
     if not st.session_state.evaluator.strip():
         st.warning("Please enter your **Evaluator name** in the sidebar.")
     else:
-        case_id = st.selectbox(
-            "Case ID", cases_df["case_id"].unique().tolist()
-        )
+        case_id = st.selectbox("Case ID", cases_df["case_id"].unique().tolist())
         row = cases_df[cases_df["case_id"] == case_id].iloc[0]
 
         left, right = st.columns([1, 1])
@@ -308,12 +297,11 @@ with tab_evaluate:
         with right:
             st.markdown("### Instructions")
             st.write(
-                "You will evaluate **one note at a time**. "
-                "Each note is labeled A–E. Please score *each* note "
-                "for this case if possible."
+                "Evaluate one note at a time. Each note is labelled **A–E**. "
+                "Please try to score all available notes for this case."
             )
 
-        # Determine which labels are available (non-empty)
+        # Which note labels exist for this case?
         available_labels = []
         for lab in ["A", "B", "C", "D", "E"]:
             col = f"note_{lab.lower()}"
@@ -345,12 +333,8 @@ with tab_evaluate:
             if st.session_state.wizard_mode:
                 rubric_items = list(RUBRIC.items())
                 total_q = len(rubric_items)
-                for i, (label, (w, help_txt)) in enumerate(
-                    rubric_items, start=1
-                ):
-                    st.progress(
-                        i / total_q, text=f"Question {i} of {total_q}"
-                    )
+                for i, (label, (w, help_txt)) in enumerate(rubric_items, start=1):
+                    st.progress(i / total_q, text=f"Question {i} of {total_q}")
                     subscores[label] = st.slider(
                         f"{i}. {label}",
                         *RANGE,
@@ -366,9 +350,7 @@ with tab_evaluate:
                     st.divider()
             else:
                 cols = st.columns(2)
-                for i, (label, (w, help_txt)) in enumerate(
-                    RUBRIC.items(), start=1
-                ):
+                for i, (label, (w, help_txt)) in enumerate(RUBRIC.items(), start=1):
                     with cols[i % 2]:
                         subscores[label] = st.slider(
                             f"{i}. {label}",
@@ -385,9 +367,7 @@ with tab_evaluate:
 
             # Section B — Critical Safety Flags
             st.markdown("## Section B — Critical Safety Flags")
-            flags = st.multiselect(
-                "Select any that apply:", list(CRITICAL_FLAGS.keys())
-            )
+            flags = st.multiselect("Select any that apply:", list(CRITICAL_FLAGS.keys()))
 
             # Section C — PCNE
             st.markdown("## Section C — PCNE v9.1")
@@ -396,16 +376,13 @@ with tab_evaluate:
                 "Causes (select all that apply)", PCNE_CAUSES
             )
             pcne_interventions = st.multiselect(
-                "Interventions (select all that apply)",
-                PCNE_INTERVENTIONS,
+                "Interventions (select all that apply)", PCNE_INTERVENTIONS
             )
             pcne_outcome = st.selectbox("Outcome", PCNE_OUTCOMES)
 
             # Section D — Overall & confidence
             st.markdown("## Section D — Overall comment & confidence")
-            overall_comment = st.text_area(
-                "Overall comment", height=120
-            )
+            overall_comment = st.text_area("Overall comment", height=120)
             confidence = st.select_slider(
                 "Rater confidence", options=[0, 1, 2, 3, 4, 5], value=4
             )
@@ -427,7 +404,7 @@ with tab_evaluate:
                     "center": st.session_state.center.strip(),
                     "evaluator": st.session_state.evaluator.strip(),
                     "case_id": case_id,
-                    "note_label": lab,  # A–E ONLY (no model name)
+                    "note_label": lab,  # A–E ONLY (no model/human name)
                     "base_score": base,
                     "final_score": final,
                     "confidence": confidence,
@@ -437,20 +414,14 @@ with tab_evaluate:
                     "pcne_causes": "; ".join(pcne_causes),
                     "pcne_interventions": "; ".join(pcne_interventions),
                     "pcne_outcome": pcne_outcome,
+                    **{f"score::{k}": v for k, v in subscores.items()},
                     **{
-                        f"score::{k}": v
-                        for k, v in subscores.items()
-                    },
-                    **{
-                        f"comment::{k}": (
-                            section_comments.get(k, "") or ""
-                        )
+                        f"comment::{k}": (section_comments.get(k, "") or "")
                         for k in subscores.keys()
                     },
                 }
                 st.session_state.evaluations.append(entry)
                 st.success("Saved.")
-
 
 # -------------------
 # REVIEW
@@ -498,7 +469,6 @@ with tab_review:
             use_container_width=True,
             height=450,
         )
-
 
 # -------------------
 # EXPORT
