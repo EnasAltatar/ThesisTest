@@ -1,60 +1,51 @@
+"""
+build_eval_input.py — FINAL VERSION
+Converts AI notes + KHCC original case notes into long-format input
+for the blinded evaluation app.
+
+Input:
+  - KHCC_AI_Notes.xlsx
+Output:
+  - khcc_eval_input.xlsx
+"""
+
 import pandas as pd
 
-# ========= 1) Load input files =========
-# Adjust filenames here if yours are different
-KHCC_CASES_FILE = "khcc_cases_200.xlsx"
-AI_NOTES_FILE   = "KHCC_AI_Notes.xlsx"
-OUTPUT_FILE     = "khcc_eval_input.xlsx"
+AI_NOTES_FILE = "KHCC_AI_Notes.xlsx"
+OUT_FILE = "khcc_eval_input.xlsx"
 
-print(f"Loading cases from: {KHCC_CASES_FILE}")
-cases = pd.read_excel(KHCC_CASES_FILE)
+def main():
+    print(f"Loading AI file: {AI_NOTES_FILE}")
+    df = pd.read_excel(AI_NOTES_FILE)
 
-print(f"Loading AI notes from: {AI_NOTES_FILE}")
-ai = pd.read_excel(AI_NOTES_FILE)
+    long_rows = []
 
-# ========= 2) Standardize key column name =========
-# Both tables must have the same key to merge on
-cases = cases.rename(columns={"Case_ID": "case_id"})
-ai    = ai.rename(columns={"Case_ID": "case_id"})
+    for _, row in df.iterrows():
+        cid = row["case_id"]
+        summary = row["patient_summary"]
 
-# Optional: strip whitespace from case_id
-cases["case_id"] = cases["case_id"].astype(str).str.strip()
-ai["case_id"]    = ai["case_id"].astype(str).str.strip()
+        sources = {
+            "chatgpt": row.get("gpt_note", ""),
+            "claude": row.get("claude_note", ""),
+            "deepseek": row.get("deepseek_note", ""),
+            "cadss": row.get("cadss_note", ""),
+            "human": row.get("human_note", ""),
+        }
 
-# ========= 3) Merge on case_id =========
-merged = cases.merge(ai, on="case_id", how="left")
+        for src, note in sources.items():
+            if str(note).strip() == "":
+                continue
 
-print(f"Merged rows: {len(merged)}")
+            long_rows.append({
+                "case_id": cid,
+                "patient_summary": summary,
+                "note_source": src,
+                "note_text": note,
+            })
 
-# ========= 4) Build the exact columns your evaluation app expects =========
-# If your patient summary column has a different name, change it here.
-# Common options from your preprocessing:
-#   "Note_Without_Recommendations"  (recommended)
-#   "Original_Note"
-PATIENT_SUMMARY_COL = "Note_Without_Recommendations"
+    out = pd.DataFrame(long_rows)
+    out.to_excel(OUT_FILE, index=False)
+    print(f"Saved long-format evaluation file: {OUT_FILE}")
 
-# If you don't have a phase column yet, you can set everything to "1" for now.
-# Later you can change this to real phases (1, 2, 3) if you want.
-if "phase" in merged.columns:
-    phase_series = merged["phase"]
-else:
-    phase_series = 1  # all phase 1 for now
-
-eval_df = pd.DataFrame({
-    "case_id": merged["case_id"],
-    "phase": phase_series,
-    "patient_summary": merged[PATIENT_SUMMARY_COL],
-
-    # Map AI notes from KHCC_AI_Notes.xlsx
-    "chatgpt_note": merged["OpenAI_Note"],   # OpenAI column
-    "claude_note":  merged["Claude_Note"],   # Claude column
-    "cadss_note":   merged["CADSS_Note"],    # CADSS column
-
-    # Human pharmacist note from the original data
-    "human_note":   merged["Original_Note"],  # ground-truth pharmacist note
-})
-
-# ========= 5) Save for the evaluation app =========
-eval_df.to_excel(OUTPUT_FILE, index=False)
-print(f"Saved evaluation input file: {OUTPUT_FILE}")
-
+if __name__ == "__main__":
+    main()
