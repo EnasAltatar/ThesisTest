@@ -1,201 +1,135 @@
 """
-build_eval_input.py
+build_eval_input.py  – FINAL
 
-Transforms the raw KHCC notes file into a blinded evaluation input for the
-Streamlit app + a separate key mapping file.
+Takes the wide AI-notes file and prepares a tall evaluation file.
 
-INPUT
-------
-khcc_eval_input.xlsx
+Inputs (env vars, with defaults):
+- CASES_FILE: Excel file with KHCC cases       (optional, used only if needed)
+- NOTES_FILE: Excel file with AI notes (wide)  [required]
+- OUT_FILE:   Output Excel for evaluation, default "khcc_eval_input.xlsx"
 
-Expected columns (case-insensitive):
-- Case_ID
-- OpenAI_Note
-- Claude_Note
-- DeepSeek_Note
-- CADSS_Note
-- Original_Note
-- (optional) Patient_Summary / Case_Summary / Summary
+Expected NOTES_FILE columns (any of these names will be accepted):
+- case_id:        ["case_id", "Case_ID", "Case Id", "CaseID"]
+- patient_summary:["patient_summary", "Patient_Summary", "summary"]
+- GPT note:       ["gpt_note", "OpenAI_Note", "GPT_Note", "ChatGPT_Note"]
+- Claude note:    ["claude_note", "Claude_Note"]
+- DeepSeek note:  ["deepseek_note", "DeepSeek_Note"]
+- CADSS note:     ["cadss_note", "CADSS_Note", "Agent_Note"]
+- Human note:     ["human_note", "Original_Note", "Pharmacist_Note"]
 
-OUTPUT
-------
-1) khcc_eval_cases.xlsx
-   Columns:
-   - case_id
-   - patient_summary
-   - note_a  (OpenAI / ChatGPT)
-   - note_b  (Claude)
-   - note_c  (CADSS / agent)
-   - note_d  (DeepSeek)
-   - note_e  (Human / original)
-
-   This is the file you upload into the Streamlit evaluation app.
-
-2) khcc_eval_note_key.xlsx
-   Columns:
-   - case_id
-   - note_label   (A–E)
-   - note_source  (openai / claude / cadss / deepseek / human)
-
-   This is for your own analysis later when you join with the exported
-   evaluations (which only contain case_id + note_label).
+Output format (one row per note per case):
+- case_id          (string / int)
+- patient_summary  (string, if available)
+- note_label       (A/B/C/D/E)
+- note_source      ("gpt", "claude", "cadss", "deepseek", "human")
+- note_text        (full note text)
 """
 
+import os
 from pathlib import Path
 
 import pandas as pd
 
-# ---------------------------------------------------------------------
-# File names
-# ---------------------------------------------------------------------
-INPUT_FILE = Path("khcc_eval_input.xlsx")
-EVAL_CASES_FILE = Path("khcc_eval_cases.xlsx")
-NOTE_KEY_FILE = Path("khcc_eval_note_key.xlsx")
+
+# --------- ENV / CONFIG ---------
+CASES_FILE = os.getenv("CASES_FILE", "khcc_cases_200.xlsx")   # optional
+NOTES_FILE = os.getenv("NOTES_FILE", "KHCC_AI_Notes.xlsx")    # required
+OUT_FILE   = os.getenv("OUT_FILE", "khcc_eval_input.xlsx")    # output we CREATE
 
 
-def _find_col(cols_lower_map, *candidates):
-    """
-    Helper: given a dict {lower_name: original_name} and a list of candidate
-    lower-case names, return the first existing original name.
-    Raise KeyError if none are found.
-    """
-    for cand in candidates:
-        if cand in cols_lower_map:
-            return cols_lower_map[cand]
-    raise KeyError(f"None of the required columns found: {candidates}")
+LETTER_MAP = {
+    "gpt": "A",
+    "claude": "B",
+    "cadss": "C",
+    "deepseek": "D",
+    "human": "E",
+}
 
 
-def _clean_note_series(s: pd.Series) -> pd.Series:
+def find_col(df: pd.DataFrame, candidates, required: bool = True):
     """
-    Convert to string, strip, and remove rows where generation failed
-    (e.g., starts with '[ERROR] RetryError').
+    Return the first matching column name from `candidates` that exists in df.
+    Raise a clear error if required and not found.
     """
-    s = s.fillna("").astype(str).str.strip()
-    mask_error = s.str.startswith("[ERROR]")
-    s.loc[mask_error] = ""
-    return s
+    for c in candidates:
+        if c in df.columns:
+            return c
+    if required:
+        raise KeyError(f"None of the columns {candidates} were found in {NOTES_FILE}")
+    return None
 
 
 def main():
-    if not INPUT_FILE.exists():
-        raise FileNotFoundError(f"Cannot find input file: {INPUT_FILE}")
+    # --- sanity check: notes file must exist ---
+    notes_path = Path(NOTES_FILE)
+    if not notes_path.exists():
+        raise FileNotFoundError(f"Cannot find AI notes file: {NOTES_FILE}")
 
-    print(f"Reading input file: {INPUT_FILE}")
-    df = pd.read_excel(INPUT_FILE)
+    print(f"Loading AI notes from: {notes_path}")
 
-    # Build mapping from lower-case column name -> original column name
-    cols_lower = {c.lower(): c for c in df.columns}
+    notes_df = pd.read_excel(notes_path)
 
-    # Mandatory columns (with flexible naming)
-    case_col = _find_col(cols_lower, "case_id", "case", "id")
+    print("Columns in AI notes file:", list(notes_df.columns))
 
-    openai_col = _find_col(
-        cols_lower,
-        "openai_note",
-        "gpt_note",
-        "chatgpt_note",
-        "gpt4o_note",
-    )
-    claude_col = _find_col(cols_lower, "claude_note")
-    deepseek_col = _find_col(cols_lower, "deepseek_note", "deepseek_v3_note")
-    cadss_col = _find_col(
-        cols_lower,
-        "cadss_note",
-        "agent_note",
-        "ai_agent_note",
-        "collaborative_note",
-    )
-    human_col = _find_col(
-        cols_lower,
-        "original_note",
-        "human_note",
-        "pharmacist_note",
-        "clinical_pharmacist_note",
+    # --- identify column names robustly ---
+    case_col = find_col(notes_df, ["case_id", "Case_ID", "Case Id", "CaseID"])
+    summary_col = find_col(
+        notes_df,
+        ["patient_summary", "Patient_Summary", "summary"],
+        required=False,
     )
 
-    # Optional patient summary column; if missing, fallback to human note
-    try:
-        summary_col = _find_col(
-            cols_lower,
-            "patient_summary",
-            "case_summary",
-            "summary",
-            "case_description",
-        )
-    except KeyError:
-        summary_col = human_col
-        print(
-            "⚠️  No explicit patient summary column found; "
-            "using the human/original note as patient_summary."
-        )
+    gpt_col      = find_col(notes_df, ["gpt_note", "OpenAI_Note", "GPT_Note", "ChatGPT_Note"])
+    claude_col   = find_col(notes_df, ["claude_note", "Claude_Note"])
+    deepseek_col = find_col(notes_df, ["deepseek_note", "DeepSeek_Note"])
+    cadss_col    = find_col(notes_df, ["cadss_note", "CADSS_Note", "Agent_Note"])
+    human_col    = find_col(notes_df, ["human_note", "Original_Note", "Pharmacist_Note"])
 
-    # Clean notes (remove [ERROR] rows)
-    df[openai_col] = _clean_note_series(df[openai_col])
-    df[claude_col] = _clean_note_series(df[claude_col])
-    df[deepseek_col] = _clean_note_series(df[deepseek_col])
-    df[cadss_col] = _clean_note_series(df[cadss_col])
-    df[human_col] = _clean_note_series(df[human_col])
+    # --- build tall evaluation rows ---
+    rows = []
 
-    # ------------------------------------------------------------------
-    # Build evaluation cases file (wide, one row per case)
-    # ------------------------------------------------------------------
-    eval_df = pd.DataFrame(
-        {
-            "case_id": df[case_col].astype(str).str.strip(),
-            "patient_summary": df[summary_col],
-            "note_a": df[openai_col],
-            "note_b": df[claude_col],
-            "note_c": df[cadss_col],
-            "note_d": df[deepseek_col],
-            "note_e": df[human_col],
-        }
-    )
+    for _, row in notes_df.iterrows():
+        cid = row[case_col]
+        summary = ""
+        if summary_col is not None:
+            val = row[summary_col]
+            summary = "" if pd.isna(val) else str(val)
 
-    # Optional: drop rows where all notes are empty
-    all_empty = (
-        eval_df[["note_a", "note_b", "note_c", "note_d", "note_e"]]
-        .apply(lambda row: all(not str(v).strip() for v in row), axis=1)
-    )
-    before = len(eval_df)
-    eval_df = eval_df[~all_empty].reset_index(drop=True)
-    dropped = before - len(eval_df)
-    if dropped:
-        print(f"Dropped {dropped} rows where all notes were empty.")
+        def add_note(source_key: str, col_name: str):
+            note_val = row.get(col_name, "")
+            if pd.isna(note_val):
+                note_text = ""
+            else:
+                note_text = str(note_val).strip()
 
-    print(f"Writing evaluation cases file: {EVAL_CASES_FILE}")
-    eval_df.to_excel(EVAL_CASES_FILE, index=False)
+            # Skip completely empty notes
+            if not note_text:
+                return
 
-    # ------------------------------------------------------------------
-    # Build note key mapping (long format)
-    # ------------------------------------------------------------------
-    key_rows = []
+            rows.append(
+                {
+                    "case_id": cid,
+                    "patient_summary": summary,
+                    "note_label": LETTER_MAP[source_key],   # A/B/C/D/E
+                    "note_source": source_key,              # gpt / claude / cadss / deepseek / human
+                    "note_text": note_text,
+                }
+            )
 
-    mapping = [
-        ("A", "openai", openai_col),
-        ("B", "claude", claude_col),
-        ("C", "cadss", cadss_col),
-        ("D", "deepseek", deepseek_col),
-        ("E", "human", human_col),
-    ]
+        add_note("gpt", gpt_col)
+        add_note("claude", claude_col)
+        add_note("cadss", cadss_col)
+        add_note("deepseek", deepseek_col)   # NOTE D
+        add_note("human", human_col)         # NOTE E
 
-    for label, source, col in mapping:
-        tmp = pd.DataFrame(
-            {
-                "case_id": df[case_col].astype(str).str.strip(),
-                "note_label": label,
-                "note_source": source,
-            }
-        )
-        key_rows.append(tmp)
+    eval_df = pd.DataFrame(rows)
 
-    key_df = pd.concat(key_rows, ignore_index=True).drop_duplicates()
+    if eval_df.empty:
+        raise RuntimeError("No evaluation rows were created – check your input columns.")
 
-    print(f"Writing note key mapping file: {NOTE_KEY_FILE}")
-    key_df.to_excel(NOTE_KEY_FILE, index=False)
-
-    print("\nDone.")
-    print(f"- {len(eval_df)} cases written to: {EVAL_CASES_FILE}")
-    print(f"- {len(key_df)} mapping rows written to: {NOTE_KEY_FILE}")
+    out_path = Path(OUT_FILE)
+    eval_df.to_excel(out_path, index=False)
+    print(f"Saved evaluation input file with {len(eval_df)} rows to: {out_path.resolve()}")
 
 
 if __name__ == "__main__":
