@@ -1,368 +1,422 @@
 import io
-from datetime import datetime
+from typing import List, Dict, Any
 
 import pandas as pd
 import streamlit as st
 
+# ---------------------------------------------------------
+# Basic page config
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="Thesis Evaluation Tool — KHCC (Blinded, 5 Notes)",
+    layout="wide",
+)
 
-# ==============================
+# ---------------------------------------------------------
+# Session state initialisation
+# ---------------------------------------------------------
+if "cases_df" not in st.session_state:
+    st.session_state["cases_df"] = None
+
+if "eval_records" not in st.session_state:
+    st.session_state["eval_records"] = []  # list of dicts
+
+if "uploaded_filename" not in st.session_state:
+    st.session_state["uploaded_filename"] = None
+
+
+# ---------------------------------------------------------
 # Helpers
-# ==============================
+# ---------------------------------------------------------
+def load_cases_from_upload(uploaded_file):
+    """Read khcc_eval_input.xlsx into a DataFrame with basic validation."""
+    try:
+        df = pd.read_excel(uploaded_file)
 
-def normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Lowercase + strip column names."""
-    df = df.copy()
-    df.columns = [c.strip().lower() for c in df.columns]
-    return df
+        required_cols = {"case_id", "note_label", "note_text"}
+        missing = required_cols - set(df.columns)
+        if missing:
+            st.error(
+                f"The uploaded file is missing required columns: {', '.join(missing)}"
+            )
+            return None
 
+        # Ensure string types
+        df["case_id"] = df["case_id"].astype(str)
+        df["note_label"] = df["note_label"].astype(str)
 
-def detect_core_columns(df: pd.DataFrame):
-    """
-    Try to detect case_id, note_label, note_text columns
-    from flexible column names.
-    """
-    cols = {c.lower(): c for c in df.columns}
+        # Optional columns
+        for col in ["patient_summary", "note_source", "note_source_full"]:
+            if col not in df.columns:
+                df[col] = ""
 
-    def find(opts):
-        for o in opts:
-            if o in cols:
-                return cols[o]
+        return df
+    except Exception as e:
+        st.error(f"Error reading Excel file: {e}")
         return None
 
-    case_col = find(["case_id", "case id", "case"])
-    label_col = find(["note_label", "note label", "label", "noteid", "note_id", "note"])
-    text_col = find(["note_text", "note text", "note_body", "note body", "content", "text"])
 
-    # If label was mapped to "note" and text_col is None, we may have:
-    # label separate, note text in another; or the opposite.
-    # If text_col is None but there is a column literally named "note",
-    # we assume that is text, and look for label in something else.
-    if text_col is None and "note" in cols:
-        # Try to keep "label" separate if exists
-        if "label" in cols and label_col != cols["label"]:
-            label_col = cols["label"]
-            text_col = cols["note"]
-        else:
-            text_col = cols["note"]
-
-    return case_col, label_col, text_col
+def get_cases_list(df: pd.DataFrame) -> List[str]:
+    return sorted(df["case_id"].unique(), key=lambda x: (int(x) if x.isdigit() else x))
 
 
-def init_session_state():
-    if "cases_df" not in st.session_state:
-        st.session_state["cases_df"] = None
-    if "eval_records" not in st.session_state:
-        st.session_state["eval_records"] = []
+def get_labels_for_case(df: pd.DataFrame, case_id: str) -> List[str]:
+    subset = df[df["case_id"] == case_id]
+    labels = sorted(subset["note_label"].unique())
+    return labels
 
 
-# ==============================
-# UI Components
-# ==============================
+def get_note_for_case_label(df: pd.DataFrame, case_id: str, label: str) -> Dict[str, Any]:
+    subset = df[(df["case_id"] == case_id) & (df["note_label"] == label)]
+    if subset.empty:
+        return {}
+    row = subset.iloc[0]
+    return {
+        "note_text": row["note_text"],
+        "patient_summary": row.get("patient_summary", ""),
+        "note_source": row.get("note_source", ""),
+        "note_source_full": row.get("note_source_full", ""),
+    }
 
+
+# ---------------------------------------------------------
+# UI sections
+# ---------------------------------------------------------
 def sidebar_setup():
-    st.sidebar.header("Setup")
+    with st.sidebar:
+        st.header("Setup")
 
-    evaluator_name = st.sidebar.text_input("Evaluator name*", value=st.session_state.get("evaluator_name", ""))
-    center_name = st.sidebar.text_input("Center / Dept", value=st.session_state.get("center_name", ""))
+        evaluator_name = st.text_input("Evaluator name*", "")
+        center_dept = st.text_input("Center / Dept", "")
 
-    st.session_state["evaluator_name"] = evaluator_name
-    st.session_state["center_name"] = center_name
+        wizard_mode = st.toggle("Wizard Mode (one question at a time)", value=False)
 
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Upload cases file")
-    st.sidebar.caption("Upload **khcc_eval_input.xlsx** generated from your pipeline.")
+        st.markdown("---")
+        st.subheader("Upload cases (khcc_eval_input.xlsx)")
 
-    uploaded = st.sidebar.file_uploader(
-        "Upload Excel file",
-        type=["xlsx", "xls"],
-        key="cases_file_uploader",
-        label_visibility="collapsed",
+        uploaded_file = st.file_uploader(
+            "Drag and drop file here",
+            type=["xlsx"],
+            help="Use the blinded file generated from build_eval_input.py",
+        )
+
+        if uploaded_file is not None:
+            df = load_cases_from_upload(uploaded_file)
+            if df is not None:
+                st.session_state["cases_df"] = df
+                st.session_state["uploaded_filename"] = uploaded_file.name
+                st.success(
+                    f"Loaded {len(df)} rows "
+                    f"from {uploaded_file.name} "
+                    f"({df['case_id'].nunique()} unique cases)."
+                )
+
+        return evaluator_name, center_dept, wizard_mode
+
+
+def home_page():
+    st.title("Thesis Evaluation Tool — KHCC (Blinded, 5 Notes)")
+
+    st.write(
+        "Evaluating pharmacist-style recommendations for breast cancer chemotherapy. "
+        "Each case has up to five blinded notes (A–E): four AI systems and one human reference note."
     )
 
-    if uploaded is not None:
-        try:
-            df = pd.read_excel(uploaded)
-            df = normalise_columns(df)
-            case_col, label_col, text_col = detect_core_columns(df)
+    st.markdown(
+        """
+### Instructions (Summary)
 
-            missing = []
-            if case_col is None:
-                missing.append("case_id")
-            if label_col is None:
-                missing.append("note_label (A–E)")
-            if text_col is None:
-                missing.append("note_text (note content)")
+1. **Upload** the blinded evaluation file (`khcc_eval_input.xlsx`) in the sidebar.  
+2. Go to **Evaluate**:
+   * Select a **Case ID**.
+   * Select a **Note label (A–E)**.
+   * Read the note text (the author is hidden).
+   * Fill in the **PCNE V9.1 codes** (Problems, Causes, Interventions, Outcomes).
+   * Score the note using the **six-domain holistic rubric** (1–5 for each domain).
+   * Add optional comments and save.
+3. In **Review**, you can see all evaluations recorded in this session.
+4. In **Export**, download your evaluations as an Excel or CSV file for analysis.
 
-            if missing:
-                st.sidebar.error(
-                    "❌ Could not detect required columns:\n\n"
-                    + ", ".join(missing)
-                    + "\n\nMake sure your file has columns like: "
-                      "`Case_ID`, `note_label`, `note_text` / `Note`."
-                )
-                st.session_state["cases_df"] = None
-            else:
-                # Keep only what we need + any extra columns (but never show note_source)
-                keep_cols = [case_col, label_col, text_col]
-                keep_cols_set = set(keep_cols)
-                extra_cols = [c for c in df.columns if c not in keep_cols_set]
-
-                df = df[keep_cols + extra_cols].copy()
-                df.rename(
-                    columns={
-                        case_col: "case_id",
-                        label_col: "note_label",
-                        text_col: "note_text",
-                    },
-                    inplace=True,
-                )
-
-                # Normalise case_id & note_label types
-                df["case_id"] = df["case_id"].astype(str).str.strip()
-                df["note_label"] = df["note_label"].astype(str).str.strip().str.upper()
-
-                # Drop note_source from view (if it exists)
-                if "note_source" in df.columns:
-                    # we keep it in df (so it appears in export if needed),
-                    # but we will never display it in the UI.
-                    pass
-
-                st.session_state["cases_df"] = df
-                st.sidebar.success(f"Loaded {len(df)} rows.")
-
-        except Exception as e:
-            st.sidebar.error(f"Error reading Excel file: {e}")
-            st.session_state["cases_df"] = None
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Export evaluations")
-    if st.session_state["eval_records"]:
-        export_df = pd.DataFrame(st.session_state["eval_records"])
-        buf = io.BytesIO()
-        export_df.to_excel(buf, index=False)
-        buf.seek(0)
-        st.sidebar.download_button(
-            "⬇️ Download evaluations (Excel)",
-            data=buf,
-            file_name=f"khcc_eval_results_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    else:
-        st.sidebar.caption("No evaluations yet.")
+All evaluations are anonymous with respect to the models; the mapping of A–E to systems is only known in the analysis phase.
+        """
+    )
 
 
-def evaluate_page():
-    df = st.session_state.get("cases_df")
-    if df is None:
-        st.info("Please upload **khcc_eval_input.xlsx** from the sidebar to start.")
+def evaluate_page(evaluator_name: str, center_dept: str, wizard_mode: bool):
+    st.title("Evaluate a Case / Note")
+
+    if not evaluator_name:
+        st.warning("Please enter your **name** in the sidebar before evaluating.")
         return
 
-    st.header("Evaluate a Case / Note")
+    df = st.session_state.get("cases_df", None)
+    if df is None:
+        st.info("Please upload `khcc_eval_input.xlsx` in the sidebar to begin.")
+        return
 
-    # ---------------------------
-    # Case selection
-    # ---------------------------
-    case_ids = sorted(df["case_id"].unique(), key=lambda x: (len(x), x))
-    selected_case = st.selectbox("Case ID", case_ids, key="selected_case")
+    # --- Case & Note selection ---
+    case_list = get_cases_list(df)
+    if not case_list:
+        st.error("No cases found in the uploaded file.")
+        return
 
-    # Filter notes for that case
-    case_df = df[df["case_id"] == selected_case].copy()
-    if case_df.empty:
+    col_case, col_label = st.columns([2, 1])
+
+    with col_case:
+        selected_case = st.selectbox("Case ID", case_list, key="eval_case")
+
+    labels = get_labels_for_case(df, selected_case)
+    if not labels:
         st.warning("No notes available for this case.")
         return
 
-    # ---------------------------
-    # Note selection (A–E)
-    # ---------------------------
-    st.subheader("Select note to evaluate")
-    labels_available = sorted(case_df["note_label"].unique())
-    selected_label = st.radio(
-        "Note label",
-        options=labels_available,
-        key="selected_note_label",
-        horizontal=True,
-    )
+    with col_label:
+        selected_label = st.selectbox("Note label", labels, key="eval_label")
 
-    note_row = case_df[case_df["note_label"] == selected_label].iloc[0]
-    note_text = str(note_row["note_text"])
+    note_info = get_note_for_case_label(df, selected_case, selected_label)
+    if not note_info:
+        st.warning("No note found for this Case / Label combination.")
+        return
 
-    # ---------------------------
-    # Display note (no patient summary)
-    # ---------------------------
-    st.markdown("### Note Text")
-    st.text_area(
-        "Clinical pharmacist note (read-only)",
-        value=note_text,
-        height=350,
-        key="note_display",
-        disabled=True,
-        label_visibility="collapsed",
+    # ------------- Display Note (no patient summary section) -------------
+    st.subheader("Note Text (blinded)")
+    st.markdown(
+        "<div style='border:1px solid #ddd; border-radius:6px; padding:1rem; "
+        "background-color:#fafafa; white-space:pre-wrap;'>"
+        f"{note_info['note_text']}</div>",
+        unsafe_allow_html=True,
     )
 
     st.markdown("---")
 
-    # =============================
-    # PCNE V9.1 Coding
-    # =============================
-    st.subheader("PCNE V9.1 – Drug-Related Problems")
+    # ------------- PCNE V9.1 Coding -------------
+    st.header("PCNE V9.1 Coding")
 
-    st.markdown("#### A. Problem (P)")
-    p_options = {
-        "P1.1 – No effect of drug treatment despite correct use": "P1.1",
-        "P1.2 – Effect of drug treatment not optimal": "P1.2",
-        "P1.3 – Untreated indication": "P1.3",
-        "P2.1 – Adverse drug event occurs": "P2.1",
-        "P2.2 – Potential adverse drug event": "P2.2",
-        "P3 – Other / process-related": "P3",
-    }
-    p_selected = st.multiselect(
-        "Select all problems that apply",
-        options=list(p_options.keys()),
-        key="pcne_p",
+    st.markdown(
+        """
+Use PCNE to code observed drug-related problems (DRPs) in this note.
+You may select **multiple codes** per domain if needed.
+        """
     )
 
-    st.markdown("#### B. Cause (C)")
-    c_options = {
-        "C1 – Drug selection": "C1",
-        "C2 – Dose selection": "C2",
-        "C3 – Treatment duration": "C3",
-        "C4 – Drug form": "C4",
-        "C5 – Route of administration": "C5",
-        "C6 – Drug use process": "C6",
-        "C9 – Monitoring": "C9",
-    }
-    c_selected = st.multiselect(
-        "Select underlying causes",
-        options=list(c_options.keys()),
-        key="pcne_c",
-    )
+    pcne_col1, pcne_col2 = st.columns(2)
 
-    st.markdown("#### C. Intervention (I)")
-    i_options = {
-        "I0 – No intervention": "I0",
-        "I1 – At prescriber level": "I1",
-        "I2 – At patient level": "I2",
-        "I3 – At drug level": "I3",
-    }
-    i_selected = st.multiselect(
-        "Select interventions (if any)",
-        options=list(i_options.keys()),
-        key="pcne_i",
-    )
+    with pcne_col1:
+        pcne_problems = st.multiselect(
+            "Problems (P)",
+            options=[
+                "P1.1 – No effect of drug treatment",
+                "P1.2 – Effect of drug treatment not optimal",
+                "P1.3 – Untreated indication",
+                "P2.1 – Adverse drug event occurs",
+                "P2.2 – Potential adverse drug event",
+                "P3 – Other / process-related",
+            ],
+        )
 
-    st.markdown("#### D. Outcome (O)")
-    o_options = {
-        "O0 – Unknown": "O0",
-        "O1 – Solved": "O1",
-        "O2 – Partially solved": "O2",
-        "O3 – Not solved": "O3",
-    }
-    o_selected = st.radio(
-        "Expected outcome if this note were implemented",
-        options=list(o_options.keys()),
-        key="pcne_o",
-    )
+        pcne_causes = st.multiselect(
+            "Causes (C)",
+            options=[
+                "C1 – Drug selection",
+                "C2 – Dose selection",
+                "C3 – Treatment duration",
+                "C4 – Drug form",
+                "C5 – Route of administration",
+                "C6 – Drug use process",
+                "C9 – Monitoring",
+            ],
+        )
 
-    pcne_free_text = st.text_area(
-        "PCNE comments (optional)",
-        value="",
-        key="pcne_comment",
-        height=80,
+    with pcne_col2:
+        pcne_interventions = st.multiselect(
+            "Interventions (I)",
+            options=[
+                "I0 – No intervention",
+                "I1 – At prescriber level",
+                "I2 – At patient level",
+                "I3 – At drug level",
+            ],
+        )
+
+        pcne_outcomes = st.multiselect(
+            "Outcomes (O)",
+            options=[
+                "O0 – Unknown",
+                "O1 – Solved",
+                "O2 – Partially solved",
+                "O3 – Not solved",
+            ],
+        )
+
+    pcne_comment = st.text_area(
+        "PCNE comments / description of key DRPs (optional)", height=120
     )
 
     st.markdown("---")
 
-    # =============================
-    # Modified Stanford Rubric – 6 Domains
-    # =============================
-    st.subheader("Modified Stanford Holistic Evaluation Rubric (1–5)")
+    # ------------- Modified Stanford Holistic Rubric -------------
+    st.header("Holistic Rubric (1–5)")
 
-    def score_slider(label, key):
-        return st.slider(
-            label,
+    st.markdown(
+        """
+Rate the **clinical quality** of this note across six domains.  
+1 = Poor, 3 = Acceptable / borderline, 5 = Excellent.
+        """
+    )
+
+    rubric_col1, rubric_col2 = st.columns(2)
+
+    with rubric_col1:
+        clinical_reasoning = st.slider(
+            "1. Clinical Reasoning Accuracy",
             min_value=1,
             max_value=5,
             value=3,
-            step=1,
-            key=key,
+            help="Logical coherence and pharmacologic correctness of the recommendation.",
+        )
+        safety_risk = st.slider(
+            "2. Safety and Risk Sensitivity",
+            min_value=1,
+            max_value=5,
+            value=3,
+            help="Ability to detect contraindications, toxicity risks, and monitoring needs.",
+        )
+        completeness = st.slider(
+            "3. Completeness and Relevance",
+            min_value=1,
+            max_value=5,
+            value=3,
+            help="Coverage of dose, safety, interactions, supportive care, and monitoring.",
         )
 
-    s_reasoning = score_slider("1. Clinical Reasoning Accuracy", "score_reasoning")
-    s_safety = score_slider("2. Safety and Risk Sensitivity", "score_safety")
-    s_completeness = score_slider("3. Completeness and Relevance", "score_completeness")
-    s_guidelines = score_slider("4. Guideline and Protocol Adherence", "score_guidelines")
-    s_clarity = score_slider("5. Clinical Communication Clarity", "score_clarity")
-    s_overall = score_slider("6. Overall Clinical Value", "score_overall")
+    with rubric_col2:
+        guideline_adherence = st.slider(
+            "4. Guideline and Protocol Adherence",
+            min_value=1,
+            max_value=5,
+            value=3,
+            help="Alignment with KHCC protocols and international oncology standards.",
+        )
+        communication_clarity = st.slider(
+            "5. Clinical Communication Clarity",
+            min_value=1,
+            max_value=5,
+            value=3,
+            help="Structure, tone, and readability of the note.",
+        )
+        overall_value = st.slider(
+            "6. Overall Clinical Value",
+            min_value=1,
+            max_value=5,
+            value=3,
+            help="How confident you would feel using this note in real practice.",
+        )
 
-    overall_comment = st.text_area(
-        "Overall comments on this note (optional)",
-        value="",
-        key="overall_comment",
-        height=120,
+    unacceptable = st.checkbox(
+        "This note is **clinically unacceptable** / unsafe overall",
+        value=False,
     )
 
-    # =============================
-    # Save evaluation
-    # =============================
-    st.markdown("---")
-    if st.button("✅ Save evaluation for this note"):
-        if not st.session_state.get("evaluator_name"):
-            st.error("Please enter your **evaluator name** in the sidebar before saving.")
-            return
+    overall_comment = st.text_area(
+        "Overall comments on this note (optional)", height=150
+    )
 
+    st.markdown("---")
+
+    if st.button("✅ Save evaluation for this note"):
         record = {
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "evaluator_name": st.session_state.get("evaluator_name", ""),
-            "center": st.session_state.get("center_name", ""),
+            "evaluator_name": evaluator_name,
+            "center_dept": center_dept,
             "case_id": selected_case,
             "note_label": selected_label,
-            # PCNE – store code lists (comma-separated) + labels chosen
-            "pcne_p_codes": ",".join([p_options[p] for p in p_selected]) if p_selected else "",
-            "pcne_p_labels": "; ".join(p_selected),
-            "pcne_c_codes": ",".join([c_options[c] for c in c_selected]) if c_selected else "",
-            "pcne_c_labels": "; ".join(c_selected),
-            "pcne_i_codes": ",".join([i_options[i] for i in i_selected]) if i_selected else "",
-            "pcne_i_labels": "; ".join(i_selected),
-            "pcne_o_code": o_options[o_selected] if o_selected else "",
-            "pcne_o_label": o_selected,
-            "pcne_comment": pcne_free_text,
-            # Rubric scores
-            "score_reasoning": s_reasoning,
-            "score_safety": s_safety,
-            "score_completeness": s_completeness,
-            "score_guidelines": s_guidelines,
-            "score_clarity": s_clarity,
-            "score_overall": s_overall,
+            # hidden meta (for analysis only; may be empty if you deleted it)
+            "note_source": note_info.get("note_source", ""),
+            "note_source_full": note_info.get("note_source_full", ""),
+            # PCNE
+            "pcne_problems": "; ".join(pcne_problems),
+            "pcne_causes": "; ".join(pcne_causes),
+            "pcne_interventions": "; ".join(pcne_interventions),
+            "pcne_outcomes": "; ".join(pcne_outcomes),
+            "pcne_comment": pcne_comment,
+            # rubric
+            "clinical_reasoning": clinical_reasoning,
+            "safety_risk": safety_risk,
+            "completeness": completeness,
+            "guideline_adherence": guideline_adherence,
+            "communication_clarity": communication_clarity,
+            "overall_value": overall_value,
+            "clinically_unacceptable": unacceptable,
             "overall_comment": overall_comment,
         }
 
         st.session_state["eval_records"].append(record)
-        st.success(f"Saved evaluation for {selected_case} / note {selected_label}.")
-
-        # Optionally clear some fields (we leave sliders as last scores)
-        st.session_state["pcne_comment"] = ""
-        st.session_state["overall_comment"] = ""
+        st.success(f"Saved evaluation for Case {selected_case}, note {selected_label}.")
 
 
-# ==============================
-# Main
-# ==============================
+def review_page():
+    st.title("Review Saved Evaluations")
 
+    records = st.session_state.get("eval_records", [])
+    if not records:
+        st.info("No evaluations recorded in this session yet.")
+        return
+
+    df = pd.DataFrame(records)
+    st.dataframe(df, use_container_width=True)
+
+
+def export_page():
+    st.title("Export Evaluations")
+
+    records = st.session_state.get("eval_records", [])
+    if not records:
+        st.info("No evaluations to export yet.")
+        return
+
+    df = pd.DataFrame(records)
+
+    st.subheader("Preview")
+    st.dataframe(df, use_container_width=True)
+
+    # Excel export
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="evaluations")
+    buffer.seek(0)
+
+    st.download_button(
+        label="⬇️ Download as Excel (.xlsx)",
+        data=buffer,
+        file_name="khcc_evaluations.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    # CSV export
+    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        label="⬇️ Download as CSV",
+        data=csv_bytes,
+        file_name="khcc_evaluations.csv",
+        mime="text/csv",
+    )
+
+
+# ---------------------------------------------------------
+# Main router
+# ---------------------------------------------------------
 def main():
-    st.set_page_config(
-        page_title="Thesis Evaluation Tool — KHCC (Blinded, 5 Notes)",
-        layout="wide",
-    )
-    init_session_state()
+    evaluator_name, center_dept, wizard_mode = sidebar_setup()
 
-    st.title("Thesis Evaluation Tool — KHCC (Blinded, 5 Notes)")
-    st.caption(
-        "Evaluating pharmacist-style recommendations for breast cancer chemotherapy.\n\n"
-        "All evaluations are **blinded**; note identity (model vs human) is hidden."
-    )
+    tabs = st.tabs(["🏠 Home", "🧪 Evaluate", "📋 Review", "📤 Export"])
 
-    sidebar_setup()
-    evaluate_page()
+    with tabs[0]:
+        home_page()
+    with tabs[1]:
+        evaluate_page(evaluator_name, center_dept, wizard_mode)
+    with tabs[2]:
+        review_page()
+    with tabs[3]:
+        export_page()
 
 
 if __name__ == "__main__":
