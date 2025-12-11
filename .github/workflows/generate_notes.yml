@@ -16,26 +16,19 @@ jobs:
 
       # === Models ===
       GPT_MODEL: gpt-4o-mini
-      CLAUDE_MODEL: claude-3-5-sonnet-latest
+      CLAUDE_MODEL: claude-3-5-sonnet-latest   # <— important change
       DEEPSEEK_MODEL: deepseek-chat
       DEEPSEEK_R: deepseek-reasoner
-
-      # === CADSS routing ===
-      CADSS_GENERATOR: gpt       # gpt | claude | deepseek
-      CADSS_REVIEWER: deepseek   # gpt | claude | deepseek
-      CADSS_SYNTH: claude        # claude | gpt | deepseek
 
       # === Input / Output ===
       INPUT_EXCEL: khcc_cases_200.xlsx
       INPUT_SHEET: Sheet1
       OUT_DIR: outputs_khcc
-      SOURCES: gpt,claude,deepseek,cadss
 
-      # === Limits (first 10 cases only) ===
+      # === Limits (you can change ROW_LIMIT when ready) ===
       ROW_LIMIT: 10
       PER_CASE_SLEEP: 0.8
 
-      # Temperatures
       GEN_TEMPERATURE: "0.2"
       REV_TEMPERATURE: "0.3"
       SYN_TEMPERATURE: "0.2"
@@ -63,9 +56,9 @@ jobs:
           print("Sheet names:", wb.sheetnames)
           PY
 
-      - name: Run AI note generator on KHCC cases (first 10)
+      - name: Run AI note generator on KHCC cases
         run: |
-          echo ">>> Running generate_ai_notes.py on khcc_cases_200.xlsx (first 10 rows)..."
+          echo ">>> Running generate_ai_notes.py on khcc_cases_200.xlsx..."
           python scripts/generate_ai_notes.py
           echo ">>> Generator completed. Listing outputs:"
           ls -la "$OUT_DIR" || true
@@ -73,5 +66,5 @@ jobs:
       - name: Upload generated outputs
         uses: actions/upload-artifact@v4
         with:
-          name: khcc_ai_notes_first_10
+          name: khcc_ai_notes
           path: ${{ env.OUT_DIR }}/
