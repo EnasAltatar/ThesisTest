@@ -380,7 +380,7 @@ def export_page():
 
     # Excel export
     buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="evaluations")
     buffer.seek(0)
 
@@ -421,3 +421,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
