@@ -1,41 +1,22 @@
 """
-generate_ai_notes.py — FINAL VERSION FOR KHCC
+generate_ai_notes.py — FINAL VERSION FOR KHCC (de-identified, robust Claude/CADSS)
 
 Produces AI clinical pharmacist recommendations for each KHCC case and saves
-them in a long, analysis-ready Excel file.
+them in an analysis-ready Excel file.
 
-INPUT (env / defaults)
-----------------------
-- INPUT_EXCEL: Excel file with KHCC cases (default: "khcc_cases_200.xlsx")
-- INPUT_SHEET: Sheet index or name (default: 0)
+Required input columns (case-insensitive):
+- Case_ID        -> case_id
+- Original_Note  -> original_note (optional in prompts, used only as reference)
 
-Required columns in the Excel file (case-insensitive):
-- Case_ID           (becomes "case_id")
-- Original_Note     (becomes "original_note")
-
-Optional clinical columns (if missing, they are just left blank in the summary):
+Optional clinical columns:
 - sex, age, diagnosis_subtype, regimen, lvef, crcl,
   ast, alt, tbil, comorbidities, meds
-
-OUTPUT (env / defaults)
------------------------
-- OUT_DIR: directory for outputs (default: "outputs_khcc")
-- OUT_FILE: full path to Excel file. If not provided, defaults to
-  "<OUT_DIR>/KHCC_AI_Notes.xlsx"
-
-Columns in the output:
-- case_id
-- patient_summary
-- gpt_note
-- claude_note
-- deepseek_note
-- cadss_note
-- human_note
 """
 
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -50,7 +31,6 @@ INPUT_EXCEL = os.getenv("INPUT_EXCEL", "khcc_cases_200.xlsx")
 INPUT_SHEET = os.getenv("INPUT_SHEET", 0)
 
 OUT_DIR = os.getenv("OUT_DIR", "outputs_khcc")
-# If OUT_FILE isn't provided, put it under OUT_DIR
 OUT_FILE = os.getenv("OUT_FILE")
 if not OUT_FILE:
     OUT_FILE = str(Path(OUT_DIR) / "KHCC_AI_Notes.xlsx")
@@ -82,13 +62,34 @@ DEEPSEEK_BASE = "https://api.deepseek.com"
 oai = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 ac = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
+
 # ---------------------------------------------------------------------
 # API wrappers with retry
 # ---------------------------------------------------------------------
+def _ensure_openai() -> None:
+    if oai is None:
+        raise RuntimeError(
+        "OpenAI client not initialized. Check OPENAI_API_KEY in your GitHub secrets / .env."
+        )
+
+
+def _ensure_claude() -> None:
+    if ac is None:
+        raise RuntimeError(
+        "Anthropic client not initialized. Check ANTHROPIC_API_KEY (CLAUDE_API_KEY secret)."
+        )
+
+
+def _ensure_deepseek() -> None:
+    if not DEEPSEEK_API_KEY:
+        raise RuntimeError(
+        "DeepSeek API key missing. Check DEEPSEEK_API_KEY in your GitHub secrets / .env."
+        )
 
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential_jitter(1, 3))
 def call_gpt(prompt: str, temp: float = 0.2) -> str:
+    _ensure_openai()
     r = oai.chat.completions.create(
         model=GPT_MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -99,10 +100,11 @@ def call_gpt(prompt: str, temp: float = 0.2) -> str:
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential_jitter(1, 3))
 def call_claude(prompt: str, temp: float = 0.2) -> str:
+    _ensure_claude()
     r = ac.messages.create(
         model=CLAUDE_MODEL,
         temperature=temp,
-        max_tokens=1600,
+        max_tokens=1800,
         messages=[{"role": "user", "content": prompt}],
     )
     return r.content[0].text.strip()
@@ -110,11 +112,12 @@ def call_claude(prompt: str, temp: float = 0.2) -> str:
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential_jitter(1, 3))
 def call_deepseek(prompt: str, model: str, temp: float = 0.2) -> str:
+    _ensure_deepseek()
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {
+    payload: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temp,
@@ -126,13 +129,17 @@ def call_deepseek(prompt: str, model: str, temp: float = 0.2) -> str:
 
 
 # ---------------------------------------------------------------------
-# PROMPTS
+# PROMPTS  (all de-identified)
 # ---------------------------------------------------------------------
+DEIDENT_INSTRUCTION = (
+    "Very important: DO NOT include any patient identifiers such as name, "
+    "MRN, hospital number, national ID, case ID, or date of birth. "
+    "Refer to the person only as 'the patient'."
+)
 
 
 def build_patient_summary(row: pd.Series) -> str:
-    """Generate a structured summary for the evaluation app."""
-    # row.get() on a pandas Series is safe even if the key doesn't exist
+    """Generate a structured, de-identified summary for the models."""
     return (
         f"Sex: {row.get('sex', '')}, Age: {row.get('age', '')}. "
         f"Diagnosis: {row.get('diagnosis_subtype', '')}. "
@@ -149,36 +156,45 @@ def build_patient_summary(row: pd.Series) -> str:
 
 def build_case_prompt(row: pd.Series) -> str:
     return f"""
-You are a clinical oncology pharmacist.
+You are a clinical oncology pharmacist at a tertiary cancer center.
 
-Patient Summary:
+Patient Summary (already de-identified):
 {build_patient_summary(row)}
 
-Provide structured pharmacist recommendations with:
-1) Dose verification
-2) Safety issues
-3) Interactions
-4) Supportive care
-5) Monitoring
-6) Final plan
+{DEIDENT_INSTRUCTION}
+
+Provide a concise, structured pharmacist recommendation that covers:
+1) Dose verification and adjustments
+2) Safety issues (organ function, toxicity risks)
+3) Drug–drug and drug–disease interactions
+4) Supportive care (e.g., antiemetics, growth factors, adjuncts)
+5) Monitoring (labs, imaging, clinical follow-up)
+6) Final plan / key recommendations
+
+Write the note as if documenting in a KHCC chemotherapy verification note.
 """.strip()
 
 
 def build_review_prompt(case_prompt: str, draft: str) -> str:
     return f"""
-Review the following draft clinical pharmacist recommendation for clinical
-accuracy and safety.
+You are reviewing a clinical oncology pharmacist note for accuracy and safety.
 
-Case:
+{DEIDENT_INSTRUCTION}
+
+Case (context):
 {case_prompt}
 
-Draft:
+Draft note:
 \"\"\"{draft}\"\"\"
 
-Return STRICT JSON with the keys exactly as:
+Identify any problems and required changes. Return STRICT JSON with keys:
 {{
-  "issues": [...],
-  "required_changes": [...]
+  "issues": [
+    "short description of each problem..."
+  ],
+  "required_changes": [
+    "what must be changed to make the note clinically correct and safe..."
+  ]
 }}
 """.strip()
 
@@ -188,57 +204,82 @@ def build_synthesis_prompt(case_prompt: str, draft: str, critique: str) -> str:
 You are an expert clinical oncology pharmacist.
 
 Task:
-Apply the reviewer feedback and produce a final optimized KHCC-style
-clinical pharmacist note.
+Use the reviewer feedback to produce a FINAL optimized KHCC-style
+clinical pharmacist note for chemotherapy verification.
 
-Case:
+{DEIDENT_INSTRUCTION}
+
+Case (context):
 {case_prompt}
 
-Draft:
+Original draft:
 \"\"\"{draft}\"\"\"
 
 Reviewer critique (JSON):
 {critique}
 
-Return the FINAL NOTE ONLY, without any explanations or JSON.
+Return the FINAL NOTE ONLY, in clear sections, without any explanations or JSON.
 """.strip()
 
 
 # ---------------------------------------------------------------------
-# CADSS (generator → reviewer → synthesis)
+# CADSS (generator → reviewer → synthesis) with fallbacks
 # ---------------------------------------------------------------------
-
-
 def cadss_flow(case_prompt: str) -> str:
+    """
+    Multi-step CADSS flow:
+    1) GPT generates a draft.
+    2) DeepSeek reviewer creates JSON critique.
+    3) Claude synthesizes final note.
+    If reviewer or Claude fails, we fall back gracefully.
+    """
+
     # 1) Generator (GPT)
     draft = call_gpt(case_prompt, GEN_TEMPERATURE)
 
-    # 2) Reviewer (DeepSeek Reasoner)
-    rev_json = call_deepseek(
-        build_review_prompt(case_prompt, draft),
-        model=DEEPSEEK_R,
-        temp=REV_TEMPERATURE,
-    )
+    # 2) Reviewer (DeepSeek Reasoner) with safe fallback JSON
+    try:
+        rev_json = call_deepseek(
+            build_review_prompt(case_prompt, draft),
+            model=DEEPSEEK_R,
+            temp=REV_TEMPERATURE,
+        )
+    except Exception as e:
+        rev_json = (
+            '{'
+            f'"issues": ["Reviewer model error: {str(e)[:120]}"], '
+            '"required_changes": []'
+            '}'
+        )
 
-    # 3) Synthesizer (Claude)
-    final = call_claude(
-        build_synthesis_prompt(case_prompt, draft, rev_json),
-        SYN_TEMPERATURE,
-    )
-
-    return final
+    # 3) Synthesizer (Claude) with GPT fallback if Claude fails
+    try:
+        final = call_claude(
+            build_synthesis_prompt(case_prompt, draft, rev_json),
+            SYN_TEMPERATURE,
+        )
+        return final
+    except Exception as e:
+        # Fallback to GPT synthesizer so we still get a usable CADSS note
+        fallback_note = call_gpt(
+            build_synthesis_prompt(case_prompt, draft, rev_json),
+            SYN_TEMPERATURE,
+        )
+        return (
+            "[FALLBACK_FROM_CLAUDE] "
+            "Claude synthesis failed; note synthesized by GPT instead.\n\n"
+            + fallback_note
+        )
 
 
 # ---------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------
-
-
-def main():
+def main() -> None:
     print(f"Loading KHCC cases from: {INPUT_EXCEL}")
     df = pd.read_excel(INPUT_EXCEL, sheet_name=INPUT_SHEET)
 
-    # Normalize column names to lowercase (fixes 'Case_ID' vs 'case_id', etc.)
+    # Normalize column names to lowercase
     df.columns = [str(c).strip().lower() for c in df.columns]
 
     if ROW_LIMIT > 0:
@@ -248,7 +289,7 @@ def main():
     out_dir_path = Path(OUT_DIR)
     out_dir_path.mkdir(parents=True, exist_ok=True)
 
-    records = []
+    records: list[dict[str, Any]] = []
 
     for idx, row in df.iterrows():
         try:
@@ -256,7 +297,7 @@ def main():
         except KeyError:
             raise KeyError(
                 "Column 'case_id' not found after lowercasing headers. "
-                "Make sure your Excel file has a 'Case_ID' (or similar) column."
+                "Make sure your Excel file has a 'Case_ID' column."
             )
 
         print(f"Processing case_id={cid} (row {idx + 1}/{len(df)})")
@@ -264,31 +305,31 @@ def main():
         case_prompt = build_case_prompt(row)
         patient_summary = build_patient_summary(row)
 
-        # GPT
+        # GPT note
         try:
             gpt_note = call_gpt(case_prompt)
         except Exception as e:
-            gpt_note = f"[ERROR] {e}"
+            gpt_note = f"[ERROR_FROM_GPT] {e}"
 
-        # Claude
+        # Claude note
         try:
             claude_note = call_claude(case_prompt)
         except Exception as e:
-            claude_note = f"[ERROR] {e}"
+            claude_note = f"[ERROR_FROM_CLAUDE] {e}"
 
-        # DeepSeek
+        # DeepSeek note
         try:
             ds_note = call_deepseek(case_prompt, model=DEEPSEEK_MODEL)
         except Exception as e:
-            ds_note = f"[ERROR] {e}"
+            ds_note = f"[ERROR_FROM_DEEPSEEK] {e}"
 
-        # CADSS
+        # CADSS (multi-model) note
         try:
             cadss_note = cadss_flow(case_prompt)
         except Exception as e:
-            cadss_note = f"[ERROR] {e}"
+            cadss_note = f"[ERROR_FROM_CADSS] {e}"
 
-        # Human note (optional, used later for comparison)
+        # Human reference (not used in prompts)
         human_note = row.get("original_note", "")
 
         records.append(
