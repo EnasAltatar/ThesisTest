@@ -1,19 +1,12 @@
 """
-generate_ai_notes.py — FINAL VERSION FOR KHCC (de-identified, robust Claude/CADSS)
+generate_ai_notes.py — KHCC (de-identified, robust Claude/CADSS)
 
 Produces AI clinical pharmacist recommendations for each KHCC case and saves
 them in an analysis-ready Excel file.
-
-Required input columns (case-insensitive):
-- Case_ID        -> case_id
-- Original_Note  -> original_note (optional in prompts, used only as reference)
-
-Optional clinical columns:
-- sex, age, diagnosis_subtype, regimen, lvef, crcl,
-  ast, alt, tbil, comorbidities, meds
 """
 
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -64,29 +57,83 @@ ac = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else No
 
 
 # ---------------------------------------------------------------------
-# API wrappers with retry
+# Helpers
 # ---------------------------------------------------------------------
 def _ensure_openai() -> None:
     if oai is None:
-        raise RuntimeError(
-        "OpenAI client not initialized. Check OPENAI_API_KEY in your GitHub secrets / .env."
-        )
+        raise RuntimeError("OPENAI_API_KEY missing / invalid.")
 
 
 def _ensure_claude() -> None:
     if ac is None:
-        raise RuntimeError(
-        "Anthropic client not initialized. Check ANTHROPIC_API_KEY (CLAUDE_API_KEY secret)."
-        )
+        raise RuntimeError("ANTHROPIC_API_KEY missing / invalid.")
 
 
 def _ensure_deepseek() -> None:
     if not DEEPSEEK_API_KEY:
-        raise RuntimeError(
-        "DeepSeek API key missing. Check DEEPSEEK_API_KEY in your GitHub secrets / .env."
-        )
+        raise RuntimeError("DEEPSEEK_API_KEY missing / invalid.")
 
 
+def sanitize_note(text: str) -> str:
+    """
+    Post-process a generated note to enforce de-identification:
+    - remove MRN / ID / case ID / hospital number / patient name lines
+    - drop any 'Patient Summary' header block entirely
+    - remove obvious '[Redacted]' placeholders
+    """
+    if not isinstance(text, str):
+        return text
+
+    # If it's clearly an error marker, keep it as-is
+    if text.startswith("[ERROR_FROM_"):
+        return text
+
+    lines = text.splitlines()
+    cleaned_lines: list[str] = []
+    drop_block = False
+
+    identifier_patterns = [
+        r"\bMRN\b",
+        r"\bmedical record\b",
+        r"\bhospital number\b",
+        r"\bcase id\b",
+        r"\bpatient id\b",
+        r"\bnational id\b",
+        r"\bfile number\b",
+        r"\bchart number\b",
+        r"\bpatient name\b",
+        r"Name:\s",
+    ]
+
+    id_regex = re.compile("|".join(identifier_patterns), flags=re.IGNORECASE)
+
+    for line in lines:
+        # Skip "Patient Summary" block entirely
+        if re.search(r"patient summary", line, flags=re.IGNORECASE):
+            drop_block = True
+            continue
+        if drop_block:
+            # Stop dropping once we hit a blank line or a section header
+            if line.strip() == "" or re.match(r"\s*\*\*?\d+\)", line) or line.startswith("---"):
+                drop_block = False
+            continue
+
+        # Remove lines with ID-like content
+        if id_regex.search(line):
+            continue
+
+        # Strip "[Redacted]" tokens if any remain
+        line = line.replace("[Redacted]", "").replace("  ", " ").rstrip()
+
+        cleaned_lines.append(line)
+
+    cleaned = "\n".join(cleaned_lines).strip()
+    return cleaned
+
+
+# ---------------------------------------------------------------------
+# API wrappers with retry
+# ---------------------------------------------------------------------
 @retry(stop=stop_after_attempt(4), wait=wait_exponential_jitter(1, 3))
 def call_gpt(prompt: str, temp: float = 0.2) -> str:
     _ensure_openai()
@@ -132,8 +179,9 @@ def call_deepseek(prompt: str, model: str, temp: float = 0.2) -> str:
 # PROMPTS  (all de-identified)
 # ---------------------------------------------------------------------
 DEIDENT_INSTRUCTION = (
-    "Very important: DO NOT include any patient identifiers such as name, "
-    "MRN, hospital number, national ID, case ID, or date of birth. "
+    "Very important: do NOT include any identifiers such as name, MRN, "
+    "hospital number, national ID, case ID, or date of birth. "
+    "Do not invent placeholders like '[Redacted]' for these fields. "
     "Refer to the person only as 'the patient'."
 )
 
@@ -158,20 +206,22 @@ def build_case_prompt(row: pd.Series) -> str:
     return f"""
 You are a clinical oncology pharmacist at a tertiary cancer center.
 
-Patient Summary (already de-identified):
+The case information below is already de-identified.
+
+Patient clinical summary:
 {build_patient_summary(row)}
 
 {DEIDENT_INSTRUCTION}
 
-Provide a concise, structured pharmacist recommendation that covers:
+Provide a concise, structured pharmacist recommendation covering:
 1) Dose verification and adjustments
 2) Safety issues (organ function, toxicity risks)
 3) Drug–drug and drug–disease interactions
-4) Supportive care (e.g., antiemetics, growth factors, adjuncts)
+4) Supportive care (antiemetics, growth factors, adjuncts)
 5) Monitoring (labs, imaging, clinical follow-up)
 6) Final plan / key recommendations
 
-Write the note as if documenting in a KHCC chemotherapy verification note.
+Write it as a chemotherapy verification note.
 """.strip()
 
 
@@ -204,8 +254,8 @@ def build_synthesis_prompt(case_prompt: str, draft: str, critique: str) -> str:
 You are an expert clinical oncology pharmacist.
 
 Task:
-Use the reviewer feedback to produce a FINAL optimized KHCC-style
-clinical pharmacist note for chemotherapy verification.
+Use the reviewer feedback to produce a FINAL optimized chemotherapy
+verification note.
 
 {DEIDENT_INSTRUCTION}
 
@@ -226,14 +276,6 @@ Return the FINAL NOTE ONLY, in clear sections, without any explanations or JSON.
 # CADSS (generator → reviewer → synthesis) with fallbacks
 # ---------------------------------------------------------------------
 def cadss_flow(case_prompt: str) -> str:
-    """
-    Multi-step CADSS flow:
-    1) GPT generates a draft.
-    2) DeepSeek reviewer creates JSON critique.
-    3) Claude synthesizes final note.
-    If reviewer or Claude fails, we fall back gracefully.
-    """
-
     # 1) Generator (GPT)
     draft = call_gpt(case_prompt, GEN_TEMPERATURE)
 
@@ -258,18 +300,18 @@ def cadss_flow(case_prompt: str) -> str:
             build_synthesis_prompt(case_prompt, draft, rev_json),
             SYN_TEMPERATURE,
         )
-        return final
     except Exception as e:
-        # Fallback to GPT synthesizer so we still get a usable CADSS note
         fallback_note = call_gpt(
             build_synthesis_prompt(case_prompt, draft, rev_json),
             SYN_TEMPERATURE,
         )
-        return (
-            "[FALLBACK_FROM_CLAUDE] "
-            "Claude synthesis failed; note synthesized by GPT instead.\n\n"
+        final = (
+            "[FALLBACK_FROM_CLAUDE] Claude synthesis failed; "
+            "note synthesized by GPT instead.\n\n"
             + fallback_note
         )
+
+    return sanitize_note(final)
 
 
 # ---------------------------------------------------------------------
@@ -307,23 +349,31 @@ def main() -> None:
 
         # GPT note
         try:
-            gpt_note = call_gpt(case_prompt)
+            gpt_raw = call_gpt(case_prompt)
+            gpt_note = sanitize_note(gpt_raw)
         except Exception as e:
             gpt_note = f"[ERROR_FROM_GPT] {e}"
 
-        # Claude note
+        # Claude note (with GPT fallback)
         try:
-            claude_note = call_claude(case_prompt)
+            claude_raw = call_claude(case_prompt)
         except Exception as e:
-            claude_note = f"[ERROR_FROM_CLAUDE] {e}"
+            fallback = call_gpt(case_prompt)
+            claude_raw = (
+                "[FALLBACK_FROM_CLAUDE] Claude failed; "
+                "note synthesized by GPT instead.\n\n"
+                + fallback
+            )
+        claude_note = sanitize_note(claude_raw)
 
         # DeepSeek note
         try:
-            ds_note = call_deepseek(case_prompt, model=DEEPSEEK_MODEL)
+            ds_raw = call_deepseek(case_prompt, model=DEEPSEEK_MODEL)
+            ds_note = sanitize_note(ds_raw)
         except Exception as e:
             ds_note = f"[ERROR_FROM_DEEPSEEK] {e}"
 
-        # CADSS (multi-model) note
+        # CADSS note
         try:
             cadss_note = cadss_flow(case_prompt)
         except Exception as e:
