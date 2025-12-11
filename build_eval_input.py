@@ -25,111 +25,139 @@ Output format (one row per note per case):
 - note_text        (full note text)
 """
 
+"""
+build_eval_input.py
+-------------------
+Takes wide AI-notes file (one row per case with 5 note columns)
+and produces a long blinded file for the Streamlit evaluation app.
+
+Input (default):  KHCC_AI_Notes.xlsx
+Output (default): khcc_eval_input.xlsx
+"""
+
 import os
+import hashlib
+import random
 from pathlib import Path
 
 import pandas as pd
 
 
-# --------- ENV / CONFIG ---------
-CASES_FILE = os.getenv("CASES_FILE", "khcc_cases_200.xlsx")   # optional
-NOTES_FILE = os.getenv("NOTES_FILE", "KHCC_AI_Notes.xlsx")    # required
-OUT_FILE   = os.getenv("OUT_FILE", "khcc_eval_input.xlsx")    # output we CREATE
+# --------- Config from env (with defaults) ----------
+NOTES_FILE = os.getenv("NOTES_FILE", "KHCC_AI_Notes.xlsx")
+OUT_FILE = os.getenv("OUT_FILE", "khcc_eval_input.xlsx")
 
 
-LETTER_MAP = {
-    "gpt": "A",
-    "claude": "B",
-    "cadss": "C",
-    "deepseek": "D",
-    "human": "E",
-}
-
-
-def find_col(df: pd.DataFrame, candidates, required: bool = True):
+def deterministic_shuffle(case_id, labels):
     """
-    Return the first matching column name from `candidates` that exists in df.
-    Raise a clear error if required and not found.
+    Shuffle labels in a deterministic way per case_id,
+    so the blinding is stable across runs.
     """
-    for c in candidates:
-        if c in df.columns:
-            return c
-    if required:
-        raise KeyError(f"None of the columns {candidates} were found in {NOTES_FILE}")
-    return None
+    seed_src = str(case_id)
+    seed = int(hashlib.sha256(seed_src.encode("utf-8")).hexdigest(), 16) % (2**32)
+    rnd = random.Random(seed)
+    labels = list(labels)
+    rnd.shuffle(labels)
+    return labels
 
 
 def main():
-    # --- sanity check: notes file must exist ---
-    notes_path = Path(NOTES_FILE)
-    if not notes_path.exists():
-        raise FileNotFoundError(f"Cannot find AI notes file: {NOTES_FILE}")
+    print(f"Loading notes from: {NOTES_FILE}")
+    if not Path(NOTES_FILE).is_file():
+        raise FileNotFoundError(f"Cannot find input file: {NOTES_FILE}")
 
-    print(f"Loading AI notes from: {notes_path}")
+    df = pd.read_excel(NOTES_FILE)
 
-    notes_df = pd.read_excel(notes_path)
+    # Normalize columns
+    cols = {c.lower(): c for c in df.columns}
 
-    print("Columns in AI notes file:", list(notes_df.columns))
+    def col(*names, required=True):
+        for n in names:
+            if n in cols:
+                return cols[n]
+        if required:
+            raise KeyError(
+                f"Required column not found. Tried names: {', '.join(names)}. "
+                f"Available columns: {list(df.columns)}"
+            )
+        return None
 
-    # --- identify column names robustly ---
-    case_col = find_col(notes_df, ["case_id", "Case_ID", "Case Id", "CaseID"])
-    summary_col = find_col(
-        notes_df,
-        ["patient_summary", "Patient_Summary", "summary"],
-        required=False,
-    )
+    case_col = col("case_id", "case id", "cid")
+    gpt_col = col("gpt_note", "gpt note", "chatgpt_note", "gpt")
+    claude_col = col("claude_note", "claude note", "claude")
+    deepseek_col = col("deepseek_note", "deepseek note", "ds_note", "deepseek")
+    cadss_col = col("cadss_note", "cadss note", "consensus_note", "cadss")
+    human_col = col("human_note", "human note", "reference_note", "pharmacist_note")
 
-    gpt_col      = find_col(notes_df, ["gpt_note", "OpenAI_Note", "GPT_Note", "ChatGPT_Note"])
-    claude_col   = find_col(notes_df, ["claude_note", "Claude_Note"])
-    deepseek_col = find_col(notes_df, ["deepseek_note", "DeepSeek_Note"])
-    cadss_col    = find_col(notes_df, ["cadss_note", "CADSS_Note", "Agent_Note"])
-    human_col    = find_col(notes_df, ["human_note", "Original_Note", "Pharmacist_Note"])
+    patient_summary_col = col("patient_summary", "summary", required=False)
 
-    # --- build tall evaluation rows ---
-    rows = []
+    # Map logical sources → column names
+    source_defs = [
+        ("GPT-4o-mini", gpt_col),
+        ("Claude-3.5-Sonnet", claude_col),
+        ("DeepSeek-Chat", deepseek_col),
+        ("CADSS", cadss_col),
+        ("Human pharmacist (KHCC baseline)", human_col),
+    ]
 
-    for _, row in notes_df.iterrows():
-        cid = row[case_col]
-        summary = ""
-        if summary_col is not None:
-            val = row[summary_col]
-            summary = "" if pd.isna(val) else str(val)
+    out_rows = []
 
-        def add_note(source_key: str, col_name: str):
-            note_val = row.get(col_name, "")
-            if pd.isna(note_val):
-                note_text = ""
-            else:
-                note_text = str(note_val).strip()
+    for _, row in df.iterrows():
+        case_id = row[case_col]
+        case_id_str = str(case_id).strip()
 
-            # Skip completely empty notes
-            if not note_text:
-                return
+        # Skip rows with missing case id
+        if not case_id_str:
+            continue
 
-            rows.append(
+        # Build list of available sources for this case
+        per_case_sources = []
+        for pretty_name, col_name in source_defs:
+            text = row.get(col_name, None)
+            if pd.isna(text) or (isinstance(text, str) and not text.strip()):
+                # Skip completely empty notes
+                continue
+            per_case_sources.append(
                 {
-                    "case_id": cid,
-                    "patient_summary": summary,
-                    "note_label": LETTER_MAP[source_key],   # A/B/C/D/E
-                    "note_source": source_key,              # gpt / claude / cadss / deepseek / human
-                    "note_text": note_text,
+                    "source_pretty": pretty_name,
+                    "source_key": col_name,
+                    "note_text": str(text),
                 }
             )
 
-        add_note("gpt", gpt_col)
-        add_note("claude", claude_col)
-        add_note("cadss", cadss_col)
-        add_note("deepseek", deepseek_col)   # NOTE D
-        add_note("human", human_col)         # NOTE E
+        if not per_case_sources:
+            # No notes for this case, skip
+            continue
 
-    eval_df = pd.DataFrame(rows)
+        # Determine labels A–E (only as many as we have notes)
+        base_labels = ["A", "B", "C", "D", "E"][: len(per_case_sources)]
+        shuffled_labels = deterministic_shuffle(case_id_str, base_labels)
 
-    if eval_df.empty:
-        raise RuntimeError("No evaluation rows were created – check your input columns.")
+        patient_summary = (
+            str(row[patient_summary_col]) if patient_summary_col and not pd.isna(row[patient_summary_col]) else ""
+        )
 
-    out_path = Path(OUT_FILE)
-    eval_df.to_excel(out_path, index=False)
-    print(f"Saved evaluation input file with {len(eval_df)} rows to: {out_path.resolve()}")
+        # Assign each note a label according to shuffled_labels
+        for label, src in zip(shuffled_labels, per_case_sources):
+            out_rows.append(
+                {
+                    "case_id": case_id_str,
+                    "note_label": label,             # A / B / C / D / E
+                    "note_text": src["note_text"],
+                    "note_source": src["source_key"],        # internal column name (hidden)
+                    "note_source_full": src["source_pretty"],  # human-readable (for analysis only)
+                    "patient_summary": patient_summary,
+                }
+            )
+
+    out_df = pd.DataFrame(out_rows)
+
+    # Sort by case then label just for neatness
+    out_df.sort_values(by=["case_id", "note_label"], inplace=True)
+
+    out_df.to_excel(OUT_FILE, index=False)
+    print(f"Saved blinded evaluation file to: {OUT_FILE}")
+    print(f"Total rows: {len(out_df)}; unique cases: {out_df['case_id'].nunique()}")
 
 
 if __name__ == "__main__":
