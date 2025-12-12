@@ -7,6 +7,11 @@ on:
         description: 'Number of rows to process (0 for all)'
         required: false
         default: '0'
+      fast_mode:
+        description: 'Use fast mode (Claude Haiku for speed)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   generate-notes:
@@ -31,6 +36,8 @@ jobs:
         echo "ANTHROPIC_API_KEY=${{ secrets.CLAUDE_API_KEY }}" >> .env
         echo "DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}" >> .env
         echo "ROW_LIMIT=${{ github.event.inputs.row_limit }}" >> .env
+        echo "USE_FAST_MODE=${{ github.event.inputs.fast_mode }}" >> .env
+        echo "CLAUDE_MODEL=claude-sonnet-4-20250514" >> .env
     
     - name: Test Claude Access (optional)
       run: python scripts/test_claude_access.py
