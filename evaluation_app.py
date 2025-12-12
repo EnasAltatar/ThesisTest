@@ -57,7 +57,7 @@ def load_cases_from_upload(uploaded_file):
 
 
 def get_cases_list(df: pd.DataFrame) -> List[str]:
-    return sorted(df["case_id"].unique(), key=lambda x: (int(x) if x.isdigit() else x))
+    return sorted(df["case_id"].unique(), key=lambda x: (int(x.split()[-1]) if x.split()[-1].isdigit() else x))
 
 
 def get_labels_for_case(df: pd.DataFrame, case_id: str) -> List[str]:
@@ -130,7 +130,8 @@ def home_page():
 2. Go to **Evaluate**:
    * Select a **Case ID**.
    * Select a **Note label (A–E)**.
-   * Read the note text (the author is hidden).
+   * Read the **Patient Summary** (clinical context for the case).
+   * Read the **Clinical Pharmacist Note** (the author is hidden).
    * Fill in the **PCNE V9.1 codes** (Problems, Causes, Interventions, Outcomes).
    * Score the note using the **six-domain holistic rubric** (1–5 for each domain).
    * Add optional comments and save.
@@ -178,8 +179,32 @@ def evaluate_page(evaluator_name: str, center_dept: str, wizard_mode: bool):
         st.warning("No note found for this Case / Label combination.")
         return
 
-    # ------------- Display Note (no patient summary section) -------------
-    st.subheader("Note Text (blinded)")
+    # ------------- Patient Summary Section (Clinical Context) -------------
+    patient_summary = note_info.get('patient_summary', '')
+    
+    if patient_summary and not pd.isna(patient_summary) and str(patient_summary).strip():
+        st.subheader("📋 Patient Summary (Clinical Context)")
+        st.info(
+            "This summary provides clinical context for the case. "
+            "Use it to understand the patient's situation before evaluating the pharmacist note below."
+        )
+        st.markdown(
+            "<div style='border:2px solid #4CAF50; border-radius:8px; padding:1.5rem; "
+            "background-color:#f0f8f5; white-space:pre-wrap; margin-bottom:2rem;'>"
+            f"{patient_summary}</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.warning("⚠️ No patient summary available for this case.")
+    
+    st.markdown("---")
+    
+    # ------------- Display Note (Blinded Pharmacist Recommendation) -------------
+    st.subheader("💊 Clinical Pharmacist Note (Blinded)")
+    st.info(
+        "This is the pharmacist recommendation note you will evaluate. "
+        "The author is blinded (could be AI or human)."
+    )
     st.markdown(
         "<div style='border:1px solid #ddd; border-radius:6px; padding:1rem; "
         "background-color:#fafafa; white-space:pre-wrap;'>"
@@ -421,4 +446,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
