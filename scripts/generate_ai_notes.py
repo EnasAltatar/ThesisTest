@@ -57,9 +57,16 @@ OUT_FILE = os.getenv("OUT_FILE")  # if None, we derive it from OUT_DIR later
 
 GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
 
-# FIXED: Use a valid current Claude model
-# Options: "claude-3-5-sonnet-20241022", "claude-sonnet-4-20250514", "claude-3-5-sonnet-latest"
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+# FIXED: Auto-detect which Claude model works
+# Try multiple model names in order of preference
+CLAUDE_MODEL_OPTIONS = [
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-sonnet-latest",
+    "claude-sonnet-4-20250514",
+    "claude-3-5-sonnet-20240620",
+    "claude-3-sonnet-20240229",
+]
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", CLAUDE_MODEL_OPTIONS[0])
 
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_R = os.getenv("DEEPSEEK_R", "deepseek-reasoner")
@@ -85,6 +92,43 @@ DEEPSEEK_BASE = "https://api.deepseek.com"
 
 oai = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 ac = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+
+
+# ---------------------------------------------------------------------
+# Auto-detect working Claude model
+# ---------------------------------------------------------------------
+
+def detect_working_claude_model() -> str:
+    """
+    Test which Claude model works with the current API key.
+    Returns the first working model name.
+    """
+    if not ac:
+        raise RuntimeError("Anthropic client not configured")
+    
+    print("🔍 Auto-detecting which Claude model works with your API key...")
+    
+    for model in CLAUDE_MODEL_OPTIONS:
+        try:
+            print(f"  Testing: {model}...", end=" ")
+            response = ac.messages.create(
+                model=model,
+                max_tokens=50,
+                messages=[{"role": "user", "content": "Say hello"}]
+            )
+            print("✅ SUCCESS!")
+            return model
+        except anthropic.NotFoundError:
+            print("❌ Not found")
+        except anthropic.PermissionDeniedError:
+            print("❌ Permission denied")
+        except Exception as e:
+            print(f"❌ Error: {type(e).__name__}")
+    
+    # If no model works, raise an error
+    raise RuntimeError(
+        "Could not find a working Claude model. Please check your API key has access to Claude models."
+    )
 
 
 # ---------------------------------------------------------------------
@@ -511,6 +555,8 @@ def get_human_note(row: pd.Series) -> str:
 
 
 def main():
+    global CLAUDE_MODEL  # Allow updating the global variable
+    
     print(f"Loading KHCC cases from: {INPUT_EXCEL}")
     df = pd.read_excel(INPUT_EXCEL, sheet_name=INPUT_SHEET)
     
@@ -522,6 +568,16 @@ def main():
     if ROW_LIMIT > 0:
         df = df.head(ROW_LIMIT)
         print(f"Processing only first {ROW_LIMIT} rows")
+    
+    # Auto-detect working Claude model
+    if ac:
+        try:
+            detected_model = detect_working_claude_model()
+            CLAUDE_MODEL = detected_model
+            print(f"\n✅ Using Claude model: {CLAUDE_MODEL}\n")
+        except Exception as e:
+            print(f"\n⚠️  WARNING: Could not detect Claude model: {e}")
+            print(f"   Will attempt to use default: {CLAUDE_MODEL}\n")
     
     # Ensure output directory exists
     out_dir_path = Path(OUT_DIR)
