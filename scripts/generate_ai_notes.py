@@ -58,15 +58,22 @@ OUT_FILE = os.getenv("OUT_FILE")  # if None, we derive it from OUT_DIR later
 GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
 
 # FIXED: Auto-detect which Claude model works
-# Try multiple model names in order of preference
+# Ordered by speed: Sonnet 4 first (latest), then Haiku (fastest)
 CLAUDE_MODEL_OPTIONS = [
-    "claude-3-5-sonnet-20241022",
+    "claude-sonnet-4-20250514",      # Latest Sonnet 4 - best quality
+    "claude-3-haiku-20240307",       # Haiku - fastest, cheapest
+    "claude-3-5-sonnet-20241022",    # May not be available
     "claude-3-5-sonnet-latest",
-    "claude-sonnet-4-20250514",
     "claude-3-5-sonnet-20240620",
     "claude-3-sonnet-20240229",
 ]
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", CLAUDE_MODEL_OPTIONS[0])
+
+# Speed optimization: Use Haiku for faster processing
+USE_FAST_MODE = os.getenv("USE_FAST_MODE", "false").lower() == "true"
+if USE_FAST_MODE:
+    print("⚡ FAST MODE enabled - using Claude Haiku for speed")
+    CLAUDE_MODEL = "claude-3-haiku-20240307"
 
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_R = os.getenv("DEEPSEEK_R", "deepseek-reasoner")
@@ -75,7 +82,7 @@ GEN_TEMPERATURE = float(os.getenv("GEN_TEMPERATURE", "0.2"))
 REV_TEMPERATURE = float(os.getenv("REV_TEMPERATURE", "0.3"))
 SYN_TEMPERATURE = float(os.getenv("SYN_TEMPERATURE", "0.2"))
 
-PER_CASE_SLEEP = float(os.getenv("PER_CASE_SLEEP", "0.3"))
+PER_CASE_SLEEP = float(os.getenv("PER_CASE_SLEEP", "0.1"))  # Reduced from 0.3 to 0.1
 ROW_LIMIT = int(os.getenv("ROW_LIMIT", "0"))
 
 # ---------------------------------------------------------------------
@@ -287,7 +294,7 @@ def call_claude(prompt: str, temp: float = 0.2) -> str:
     r = ac.messages.create(
         model=CLAUDE_MODEL,
         temperature=temp,
-        max_tokens=2048,  # Increased from 1600 for longer notes
+        max_tokens=1500,  # Reduced from 2048 for faster generation
         messages=[{"role": "user", "content": prompt}],
     )
     
