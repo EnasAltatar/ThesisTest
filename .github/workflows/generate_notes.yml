@@ -1,70 +1,56 @@
-name: Run AI Note Generation on KHCC cases
+name: Generate AI Notes
 
 on:
-  workflow_dispatch:  # manual trigger
+  workflow_dispatch:  # Manual trigger
+    inputs:
+      row_limit:
+        description: 'Number of rows to process (0 for all)'
+        required: false
+        default: '0'
 
 jobs:
-  run-khcc:
+  generate-notes:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
-    env:
-      # === API Keys from repo secrets ===
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-
-      # === Models ===
-      GPT_MODEL: gpt-4o-mini
-      CLAUDE_MODEL: claude-3-sonnet-20240229   # <— important change
-      DEEPSEEK_MODEL: deepseek-chat
-      DEEPSEEK_R: deepseek-reasoner
-
-      # === Input / Output ===
-      INPUT_EXCEL: khcc_cases_200.xlsx
-      INPUT_SHEET: Sheet1
-      OUT_DIR: outputs_khcc
-
-      # === Limits (you can change ROW_LIMIT when ready) ===
-      ROW_LIMIT: 10
-      PER_CASE_SLEEP: 0.8
-
-      GEN_TEMPERATURE: "0.2"
-      REV_TEMPERATURE: "0.3"
-      SYN_TEMPERATURE: "0.2"
-
+    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt || true
-          pip install openai anthropic httpx pandas openpyxl python-dotenv tenacity
-
-      - name: Check Excel sheet names
-        run: |
-          python - << 'PY'
-          import openpyxl
-          wb = openpyxl.load_workbook("khcc_cases_200.xlsx", read_only=True)
-          print("Sheet names:", wb.sheetnames)
-          PY
-
-      - name: Run AI note generator on KHCC cases
-        run: |
-          echo ">>> Running generate_ai_notes.py on khcc_cases_200.xlsx..."
-          python scripts/generate_ai_notes.py
-          echo ">>> Generator completed. Listing outputs:"
-          ls -la "$OUT_DIR" || true
-
-      - name: Upload generated outputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: khcc_ai_notes
-          path: ${{ env.OUT_DIR }}/
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        pip install pandas openpyxl python-dotenv openai anthropic httpx tenacity
+    
+    - name: Create .env file from secrets
+      run: |
+        echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env
+        echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> .env
+        echo "DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}" >> .env
+        echo "ROW_LIMIT=${{ github.event.inputs.row_limit }}" >> .env
+    
+    - name: Test Claude Access (optional)
+      run: python test_claude_access.py
+      continue-on-error: true
+    
+    - name: Generate AI Notes
+      run: python generate_ai_notes.py
+    
+    - name: Upload results
+      uses: actions/upload-artifact@v3
+      with:
+        name: ai-notes-output
+        path: outputs_khcc/KHCC_AI_Notes.xlsx
+        retention-days: 30
+    
+    - name: Commit results (optional)
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add outputs_khcc/KHCC_AI_Notes.xlsx
+        git commit -m "Generated AI notes" || echo "No changes to commit"
+        git push || echo "Nothing to push"
+      continue-on-error: true
