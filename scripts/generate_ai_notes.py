@@ -1,8 +1,13 @@
 """
-generate_ai_notes.py — FINAL KHCC VERSION (with de-identification + Claude fallback)
+generate_ai_notes.py — FIXED KHCC VERSION
 
-Produces AI clinical pharmacist recommendations for each KHCC case and saves
-them in an Excel file that will later be transformed into the evaluation format.
+Produces AI clinical pharmacist recommendations for each KHCC case.
+
+KEY FEATURES:
+- Robust de-identification of PHI before sending to any LLM
+- AI-generated patient summary from human notes using GPT
+- Multi-model note generation (GPT, Claude, DeepSeek)
+- CADSS pipeline with fallback handling
 
 INPUT (env / defaults)
 ----------------------
@@ -13,10 +18,6 @@ Required columns in the Excel file (case-insensitive):
 - Case_ID            (becomes "case_id")
 - Note_Original      (becomes "note_original")
 
-Optional clinical columns (if missing, we just leave them blank in the summary):
-- sex, age, diagnosis_subtype, regimen, lvef, crcl,
-  ast, alt, tbil, comorbidities, meds
-
 OUTPUT (env / defaults)
 -----------------------
 - OUT_DIR: directory for outputs (default: "outputs_khcc")
@@ -25,12 +26,12 @@ OUTPUT (env / defaults)
 
 Columns in the output:
 - case_id
-- patient_summary
+- patient_summary (AI-generated, de-identified)
 - gpt_note
 - claude_note
 - deepseek_note
 - cadss_note
-- human_note
+- human_note (original, not scrubbed)
 """
 
 import os
@@ -55,9 +56,10 @@ OUT_DIR = os.getenv("OUT_DIR", "outputs_khcc")
 OUT_FILE = os.getenv("OUT_FILE")  # if None, we derive it from OUT_DIR later
 
 GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
-# IMPORTANT: if Claude keeps returning NotFound, try a more widely available model, e.g.:
-#   claude-3-sonnet-20240229
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-sonnet-20240229")
+
+# FIXED: Use a valid current Claude model
+# Options: "claude-3-5-sonnet-20241022", "claude-sonnet-4-20250514", "claude-3-5-sonnet-latest"
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
 
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_R = os.getenv("DEEPSEEK_R", "deepseek-reasoner")
@@ -86,39 +88,126 @@ ac = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else No
 
 
 # ---------------------------------------------------------------------
-# Small helper: de-identify any accidental identifiers in model output
+# DE-IDENTIFICATION: Scrub PHI before sending to LLMs
 # ---------------------------------------------------------------------
-_PATIENT_ID_PATTERNS = [
-    r"patient\s*name\s*:\s*.*",
-    r"pt\s*name\s*:\s*.*",
-    r"name\s*:\s*.*",
-    r"patient\s*id\s*:\s*.*",
-    r"mrn\s*:\s*.*",
-    r"medical\s*record\s*(number|no\.)\s*:\s*.*",
-    r"id\s*:\s*.*",
-]
 
-_DATE_PATTERN = r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b"
+def scrub_identifiers(text: str) -> str:
+    """
+    Remove patient identifiers (names, IDs, MRNs, ages, dates) from text
+    BEFORE sending to any LLM.
+    
+    This is the PRIMARY de-identification function for INPUT text.
+    """
+    if not isinstance(text, str):
+        return ""
+    
+    scrubbed = text
+    
+    # 1) Remove explicit name/ID lines (common in clinical notes)
+    # Pattern: "Patient Name: John Doe" or "Patient ID: 12345"
+    scrubbed = re.sub(
+        r'Patient\s+Name\s*:\s*[^\n]+',
+        'Patient Name: [REDACTED_NAME]',
+        scrubbed,
+        flags=re.IGNORECASE
+    )
+    scrubbed = re.sub(
+        r'Patient\s+ID\s*:\s*[^\n]+',
+        'Patient ID: [REDACTED_ID]',
+        scrubbed,
+        flags=re.IGNORECASE
+    )
+    scrubbed = re.sub(
+        r'MRN\s*:\s*[^\n]+',
+        'MRN: [REDACTED_ID]',
+        scrubbed,
+        flags=re.IGNORECASE
+    )
+    
+    # 2) Remove explicit ages
+    # Pattern: "Patient Age: 54yr" or "Age: 54"
+    scrubbed = re.sub(
+        r'(Patient\s+)?Age\s*:\s*\d+\s*(yr|years?|y\.o\.|yo)?',
+        'Age: [REDACTED_AGE]',
+        scrubbed,
+        flags=re.IGNORECASE
+    )
+    
+    # 3) Remove dates in various formats
+    # MM/DD/YYYY, DD/MM/YYYY, YYYY-MM-DD, etc.
+    scrubbed = re.sub(
+        r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b',
+        '[REDACTED_DATE]',
+        scrubbed
+    )
+    scrubbed = re.sub(
+        r'\b\d{4}[/-]\d{1,2}[/-]\d{1,2}\b',
+        '[REDACTED_DATE]',
+        scrubbed
+    )
+    
+    # 4) Remove timestamps (HH:MM format)
+    scrubbed = re.sub(
+        r'\b\d{1,2}:\d{2}(?::\d{2})?\b',
+        '[REDACTED_TIME]',
+        scrubbed
+    )
+    
+    # 5) Remove specific identifying numbers (MRN-like patterns)
+    # This is conservative; adjust based on your ID formats
+    scrubbed = re.sub(
+        r'\b[A-Z]{2,}\d{5,}\b',
+        '[REDACTED_ID]',
+        scrubbed
+    )
+    
+    # 6) Remove institution-specific identifiers if you know the pattern
+    # Example: KHCC followed by numbers
+    scrubbed = re.sub(
+        r'\bKHCC[-\s]?\d+\b',
+        '[REDACTED_INSTITUTION_ID]',
+        scrubbed,
+        flags=re.IGNORECASE
+    )
+    
+    return scrubbed.strip()
 
 
-def deidentify_text(text: str) -> str:
-    """Remove typical identifiers like 'Patient Name', IDs, MRN, explicit dates."""
+def deidentify_model_output(text: str) -> str:
+    """
+    Additional light cleaning of model OUTPUT to catch any hallucinated
+    identifiers that the model might have generated.
+    
+    This is SECONDARY - the primary defense is scrubbing the input.
+    """
     if not isinstance(text, str):
         return text
-
-    # Remove lines that clearly contain Name / ID / MRN info
+    
+    # Remove lines that contain explicit identifier fields the model might generate
+    patterns = [
+        r"patient\s*name\s*:\s*\S+",
+        r"pt\s*name\s*:\s*\S+",
+        r"patient\s*id\s*:\s*\S+",
+        r"mrn\s*:\s*\S+",
+        r"medical\s*record\s*(number|no\.?)\s*:\s*\S+",
+    ]
+    
     lines = text.splitlines()
     cleaned_lines = []
     for line in lines:
-        if any(re.search(pat, line, flags=re.IGNORECASE) for pat in _PATIENT_ID_PATTERNS):
+        if any(re.search(pat, line, flags=re.IGNORECASE) for pat in patterns):
             continue
         cleaned_lines.append(line)
-
+    
     cleaned = "\n".join(cleaned_lines)
-
-    # Strip explicit standalone dates (we still allow relative timing words)
-    cleaned = re.sub(_DATE_PATTERN, "[date removed]", cleaned)
-
+    
+    # Also strip any standalone dates that might have been hallucinated
+    cleaned = re.sub(
+        r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b',
+        '[DATE_REMOVED]',
+        cleaned
+    )
+    
     return cleaned.strip()
 
 
@@ -126,12 +215,12 @@ def deidentify_text(text: str) -> str:
 # API wrappers with retry
 # ---------------------------------------------------------------------
 
-
 @retry(stop=stop_after_attempt(4), wait=wait_exponential_jitter(1, 3))
 def call_gpt(prompt: str, temp: float = 0.2) -> str:
+    """Call OpenAI GPT model."""
     if oai is None:
         raise RuntimeError("OpenAI client not configured (missing OPENAI_API_KEY).")
-
+    
     r = oai.chat.completions.create(
         model=GPT_MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -142,24 +231,37 @@ def call_gpt(prompt: str, temp: float = 0.2) -> str:
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential_jitter(1, 3))
 def call_claude(prompt: str, temp: float = 0.2) -> str:
+    """
+    Call Anthropic Claude model using the Messages API.
+    
+    FIXED: Now uses correct model name and proper API format.
+    """
     if ac is None:
         raise RuntimeError("Anthropic client not configured (missing ANTHROPIC_API_KEY).")
-
+    
+    # Use the Messages API (not the old Completions API)
     r = ac.messages.create(
         model=CLAUDE_MODEL,
         temperature=temp,
-        max_tokens=1600,
+        max_tokens=2048,  # Increased from 1600 for longer notes
         messages=[{"role": "user", "content": prompt}],
     )
-    # anthropic-python returns a list of content blocks
-    return "".join(block.text for block in r.content if hasattr(block, "text")).strip()
+    
+    # Extract text from content blocks
+    text_parts = []
+    for block in r.content:
+        if hasattr(block, "text"):
+            text_parts.append(block.text)
+    
+    return "".join(text_parts).strip()
 
 
 @retry(stop=stop_after_attempt(4), wait=wait_exponential_jitter(1, 3))
 def call_deepseek(prompt: str, model: str, temp: float = 0.2) -> str:
+    """Call DeepSeek model via HTTP API."""
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY is not set.")
-
+    
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
@@ -169,6 +271,7 @@ def call_deepseek(prompt: str, model: str, temp: float = 0.2) -> str:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temp,
     }
+    
     with httpx.Client(base_url=DEEPSEEK_BASE, timeout=120) as client:
         resp = client.post("/chat/completions", headers=headers, json=payload)
         resp.raise_for_status()
@@ -176,38 +279,74 @@ def call_deepseek(prompt: str, model: str, temp: float = 0.2) -> str:
 
 
 # ---------------------------------------------------------------------
-# PROMPTS
+# AI-GENERATED PATIENT SUMMARY (from human note)
 # ---------------------------------------------------------------------
 
-
-def build_patient_summary(row: pd.Series) -> str:
+def build_ai_summary(human_note: str) -> str:
     """
-    Short, de-identified summary.
-
-    NOTE:
-    Many of your KHCC rows are missing most clinical fields. That’s okay; this
-    summary is mainly to give minimal context for the model prompts.
+    Generate a structured, de-identified patient summary from the human note
+    using GPT.
+    
+    This is the KEY NEW FUNCTION that replaces the old placeholder summary.
+    
+    Args:
+        human_note: The original KHCC clinical pharmacist note
+        
+    Returns:
+        Structured summary string with key clinical information
     """
-    return (
-        f"Sex: {row.get('sex', '') or ''}, "
-        f"Age: {row.get('age', '') or ''}. "
-        f"Diagnosis: {row.get('diagnosis_subtype', '') or ''}. "
-        f"Regimen: {row.get('regimen', '') or ''}. "
-        f"LVEF: {row.get('lvef', '') or ''}. "
-        f"CrCl: {row.get('crcl', '') or ''}. "
-        f"AST/ALT/TBili: {row.get('ast', '') or ''}/"
-        f"{row.get('alt', '') or ''}/"
-        f"{row.get('tbil', '') or ''}. "
-        f"Comorbidities: {row.get('comorbidities', '') or ''}. "
-        f"Medications: {row.get('meds', '') or ''}."
-    ).strip()
+    if not human_note or pd.isna(human_note):
+        return "No human note available for summary generation."
+    
+    # First, scrub identifiers from the human note
+    scrubbed_note = scrub_identifiers(human_note)
+    
+    # Prompt GPT to extract and structure the key clinical information
+    summary_prompt = f"""
+You are a clinical oncology pharmacist. You will read a de-identified clinical note
+and extract a structured summary with ONLY the key clinical information needed for
+chemotherapy verification.
+
+STRICT REQUIREMENTS:
+- Do NOT include or mention any patient identifiers (names, IDs, MRNs, dates)
+- Focus only on clinical facts
+- Be concise but complete
+
+INPUT NOTE (de-identified):
+{scrubbed_note}
+
+OUTPUT FORMAT:
+Please provide a structured summary with these sections:
+
+Diagnosis:
+Regimen:
+Key Clinical Problems:
+Organ Function (renal, hepatic, cardiac):
+Relevant Medications:
+Comorbidities:
+Other Relevant Information:
+
+Return ONLY the structured summary, nothing else.
+""".strip()
+    
+    try:
+        summary = call_gpt(summary_prompt, temp=0.1)
+        # Apply additional output cleaning
+        summary = deidentify_model_output(summary)
+        return summary
+    except Exception as e:
+        return f"[SUMMARY_ERROR] Could not generate summary: {type(e).__name__}"
 
 
-def build_case_prompt(row: pd.Series) -> str:
+# ---------------------------------------------------------------------
+# PROMPTS for note generation
+# ---------------------------------------------------------------------
+
+def build_case_prompt(patient_summary: str) -> str:
     """
-    Main generation prompt.
-
-    Very explicit that the model must NOT mention identifiers.
+    Main generation prompt for creating clinical pharmacist notes.
+    
+    Uses the AI-generated summary (not individual fields).
     """
     return f"""
 You are a clinical oncology pharmacist at a tertiary cancer center.
@@ -220,12 +359,12 @@ STRICT DE-IDENTIFICATION RULES:
   national ID, phone number, or bed/room number.
 - Do NOT fabricate or include any patient identifiers (for example:
   'Patient Name: ...', 'Patient ID: ...', 'MRN: ...').
-- It is acceptable to refer to the person only as "the patient".
+- Refer to the person only as "the patient".
 - Do NOT invent exact calendar dates. You may use phrases such as "baseline",
   "prior to cycle 1", "every cycle", "at follow-up", etc.
 
-De-identified patient summary:
-{build_patient_summary(row)}
+DE-IDENTIFIED PATIENT SUMMARY:
+{patient_summary}
 
 Write a structured clinical pharmacist note with clear headings covering:
 1) Dose verification and adjustments
@@ -241,6 +380,7 @@ pharmacist note at KHCC.
 
 
 def build_review_prompt(case_prompt: str, draft: str) -> str:
+    """Prompt for reviewer (DeepSeek Reasoner) to critique the draft note."""
     return f"""
 You are an expert oncology clinical pharmacist reviewing a draft recommendation
 note for clinical accuracy and safety.
@@ -269,6 +409,7 @@ Do NOT include any patient identifiers or dates in your response.
 
 
 def build_synthesis_prompt(case_prompt: str, draft: str, critique: str) -> str:
+    """Prompt for synthesizer (Claude or GPT) to produce final note."""
     return f"""
 You are an expert oncology clinical pharmacist.
 
@@ -303,9 +444,8 @@ Return ONLY the final note text, with clear headings similar to:
 
 
 # ---------------------------------------------------------------------
-# CADSS (generator → reviewer → synthesis)
+# CADSS (Collaborative AI Development with Staged Synthesis)
 # ---------------------------------------------------------------------
-
 
 def cadss_flow(case_prompt: str) -> str:
     """
@@ -313,11 +453,15 @@ def cadss_flow(case_prompt: str) -> str:
       1) Generator: GPT
       2) Reviewer: DeepSeek Reasoner
       3) Synthesizer: Claude (preferred) or GPT fallback
+      
     Always returns a usable note (never raises due to model errors).
     """
     # 1) Generator (GPT)
-    draft = call_gpt(case_prompt, GEN_TEMPERATURE)
-
+    try:
+        draft = call_gpt(case_prompt, GEN_TEMPERATURE)
+    except Exception as e:
+        return f"[CADSS_GEN_ERROR] Generator (GPT) failed: {type(e).__name__}"
+    
     # 2) Reviewer (DeepSeek Reasoner)
     try:
         rev_json = call_deepseek(
@@ -326,111 +470,133 @@ def cadss_flow(case_prompt: str) -> str:
             temp=REV_TEMPERATURE,
         )
     except Exception as e:
-        # If DeepSeek fails, keep going with a simple text description
-        rev_json = f'{{"issues": ["DeepSeek error: {type(e).__name__}"], "required_changes": []}}'
-
+        # If reviewer fails, proceed with a placeholder critique
+        rev_json = f'{{"issues": ["Reviewer unavailable: {type(e).__name__}"], "required_changes": ["Proceed with draft as-is"]}}'
+    
     synth_prompt = build_synthesis_prompt(case_prompt, draft, rev_json)
-
+    
     # 3) Synthesizer: prefer Claude, fallback to GPT if Claude fails
     try:
         final = call_claude(synth_prompt, SYN_TEMPERATURE)
+        # Apply output de-identification
+        final = deidentify_model_output(final)
     except Exception as e:
-        # Fallback: GPT synthesizer instead of failing the whole CADSS note
-        fallback_note = call_gpt(
-            f"Claude (synthesizer) failed with error {type(e).__name__}. "
-            f"Please act as the synthesizer and complete this task instead.\n\n{synth_prompt}",
-            SYN_TEMPERATURE,
-        )
-        final = f"[FALLBACK_FROM_CLAUDE] {fallback_note}"
-
-    return deidentify_text(final)
+        # Fallback: GPT synthesizer
+        try:
+            fallback_note = call_gpt(
+                f"The primary synthesizer is unavailable. Please act as the synthesizer "
+                f"and complete this task.\n\n{synth_prompt}",
+                SYN_TEMPERATURE,
+            )
+            final = f"[FALLBACK_FROM_CLAUDE] {deidentify_model_output(fallback_note)}"
+        except Exception as e2:
+            # Ultimate fallback: return the draft
+            final = f"[CADSS_SYNTH_ERROR] Both synthesizers failed. Draft note:\n{draft}"
+    
+    return final
 
 
 # ---------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------
 
-
 def get_human_note(row: pd.Series) -> str:
     """
-    Pull the human KHCC note from the Excel row.
-
-    Your header in Excel is 'Note_Original ' (with a trailing space).
-    After lowercasing + strip(), it becomes 'note_original'.
+    Extract the human KHCC note from the Excel row.
+    
+    FIXED: Now correctly maps to 'note_original' after lowercasing.
     """
-    # try both, just in case
-    return (
-        row.get("note_original")
-        or row.get("original_note")
-        or row.get("note__original")  # super defensive
-        or ""
-    )
+    # After lowercasing and stripping, the column is 'note_original'
+    return str(row.get("note_original", ""))
 
 
 def main():
     print(f"Loading KHCC cases from: {INPUT_EXCEL}")
     df = pd.read_excel(INPUT_EXCEL, sheet_name=INPUT_SHEET)
-
-    # Normalise column names
+    
+    # Normalize column names (lowercase and strip)
     df.columns = [str(c).strip().lower() for c in df.columns]
-
+    
+    print(f"Columns found: {df.columns.tolist()}")
+    
     if ROW_LIMIT > 0:
         df = df.head(ROW_LIMIT)
-
+        print(f"Processing only first {ROW_LIMIT} rows")
+    
+    # Ensure output directory exists
     out_dir_path = Path(OUT_DIR)
     out_dir_path.mkdir(parents=True, exist_ok=True)
-
+    
     if not OUT_FILE:
         out_path = out_dir_path / "KHCC_AI_Notes.xlsx"
     else:
         out_path = Path(OUT_FILE)
-
+    
     records = []
-
+    
     for idx, row in df.iterrows():
+        # Validate required column
         if "case_id" not in row.index:
             raise KeyError(
                 "Column 'case_id' not found after lowercasing headers. "
                 "Make sure your Excel file has a 'Case_ID' column."
             )
-
+        
         cid = row["case_id"]
+        print(f"\n{'='*70}")
         print(f"Processing case_id={cid} (row {idx + 1}/{len(df)})")
-
-        case_prompt = build_case_prompt(row)
-        patient_summary = build_patient_summary(row)
-
+        print(f"{'='*70}")
+        
+        # Get the human note (NOT de-identified for output)
+        human_note = get_human_note(row)
+        
+        if not human_note or pd.isna(human_note):
+            print(f"  WARNING: No human note found for case {cid}")
+            human_note = ""
+        
+        # Generate AI summary from human note (THIS IS THE KEY FIX)
+        print(f"  Step 1: Generating AI patient summary...")
+        patient_summary = build_ai_summary(human_note)
+        
+        # Build the case prompt using the AI-generated summary
+        case_prompt = build_case_prompt(patient_summary)
+        
         # GPT note
+        print(f"  Step 2: Generating GPT note...")
         try:
             gpt_raw = call_gpt(case_prompt, GEN_TEMPERATURE)
-            gpt_note = deidentify_text(gpt_raw)
+            gpt_note = deidentify_model_output(gpt_raw)
         except Exception as e:
             gpt_note = f"[GPT_ERROR] {type(e).__name__}: {e}"
-
+            print(f"    ERROR: {gpt_note}")
+        
         # Claude note (standalone)
+        print(f"  Step 3: Generating Claude note...")
         try:
             claude_raw = call_claude(case_prompt, GEN_TEMPERATURE)
-            claude_note = deidentify_text(claude_raw)
+            claude_note = deidentify_model_output(claude_raw)
         except Exception as e:
             claude_note = f"[CLAUDE_ERROR] {type(e).__name__}: {e}"
-
+            print(f"    ERROR: {claude_note}")
+        
         # DeepSeek note
+        print(f"  Step 4: Generating DeepSeek note...")
         try:
             ds_raw = call_deepseek(case_prompt, model=DEEPSEEK_MODEL, temp=GEN_TEMPERATURE)
-            deepseek_note = deidentify_text(ds_raw)
+            deepseek_note = deidentify_model_output(ds_raw)
         except Exception as e:
             deepseek_note = f"[DEEPSEEK_ERROR] {type(e).__name__}: {e}"
-
+            print(f"    ERROR: {deepseek_note}")
+        
         # CADSS consolidated note
+        print(f"  Step 5: Running CADSS pipeline...")
         try:
             cadss_note = cadss_flow(case_prompt)
         except Exception as e:
             cadss_note = f"[CADSS_ERROR] {type(e).__name__}: {e}"
-
-        # Human KHCC note (NOT de-identified here; blinding is handled later
-        # when building the evaluation file)
-        human_note = get_human_note(row)
-
+            print(f"    ERROR: {cadss_note}")
+        
+        # Assemble the record
         records.append(
             {
                 "case_id": cid,
@@ -439,15 +605,23 @@ def main():
                 "claude_note": claude_note,
                 "deepseek_note": deepseek_note,
                 "cadss_note": cadss_note,
-                "human_note": human_note,
+                "human_note": human_note,  # Original, not scrubbed
             }
         )
-
+        
+        print(f"  ✓ Case {cid} complete")
+        
+        # Rate limiting
         time.sleep(PER_CASE_SLEEP)
-
+    
+    # Save to Excel
     out_df = pd.DataFrame(records)
     out_df.to_excel(out_path, index=False)
-    print(f"Saved AI notes to: {out_path.resolve()}")
+    
+    print(f"\n{'='*70}")
+    print(f"SUCCESS! Saved AI notes to: {out_path.resolve()}")
+    print(f"Total cases processed: {len(records)}")
+    print(f"{'='*70}")
 
 
 if __name__ == "__main__":
