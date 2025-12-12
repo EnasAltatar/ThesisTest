@@ -33,11 +33,13 @@ jobs:
         echo "ROW_LIMIT=${{ github.event.inputs.row_limit }}" >> .env
     
     - name: Test Claude Access (optional)
-      run: python test_claude_access.py
+      run: python scripts/test_claude_access.py
       continue-on-error: true
     
     - name: Generate AI Notes
-      run: python generate_ai_notes.py
+      run: python scripts/generate_ai_notes.py
+      env:
+        INPUT_EXCEL: scripts/khcc_cases_200.xlsx
     
     - name: Upload results
       uses: actions/upload-artifact@v4
