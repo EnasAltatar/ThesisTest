@@ -48,6 +48,7 @@ jobs:
         echo "END_ROW=${{ github.event.inputs.end_row }}" >> .env
         echo "USE_FAST_MODE=${{ github.event.inputs.fast_mode }}" >> .env
         echo "CLAUDE_MODEL=claude-sonnet-4-20250514" >> .env
+        # SKIP_CADSS is NOT set, so it defaults to false (CADSS enabled)
     
     - name: Test Claude Access (optional)
       run: python scripts/test_claude_access.py
