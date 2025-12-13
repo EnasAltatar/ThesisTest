@@ -43,7 +43,7 @@ START_ROW = int(os.getenv("START_ROW", "0"))  # 1-based row number
 END_ROW = int(os.getenv("END_ROW", "0"))  # 1-based row number
 
 # Skip CADSS for speed (generates 3 extra API calls per case)
-SKIP_CADSS = os.getenv("SKIP_CADSS", "true").lower() == "true"
+SKIP_CADSS = os.getenv("SKIP_CADSS", "false").lower() == "true"  # Changed default to "false"
 
 # ---------------------------------------------------------------------
 # SDK clients
@@ -295,7 +295,7 @@ def main():
         out_path = Path(OUT_FILE)
     
     print(f"\n⚡ Processing {len(df)} cases with {MAX_WORKERS} parallel workers...")
-    print(f"⚡ CADSS: {'SKIPPED' if SKIP_CADSS else 'ENABLED'}")
+    print(f"⚡ CADSS: {'ENABLED (slower but complete)' if not SKIP_CADSS else 'SKIPPED (faster)'}")
     print(f"⚡ Models: GPT={GPT_MODEL}, Claude={CLAUDE_MODEL}, DeepSeek={DEEPSEEK_MODEL}\n")
     
     start_time = time.time()
