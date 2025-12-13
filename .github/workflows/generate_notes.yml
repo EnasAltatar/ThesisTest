@@ -7,6 +7,14 @@ on:
         description: 'Number of rows to process (0 for all)'
         required: false
         default: '0'
+      start_row:
+        description: 'Start from row number (1-based, 0 to start from beginning)'
+        required: false
+        default: '0'
+      end_row:
+        description: 'End at row number (0 for no limit)'
+        required: false
+        default: '0'
       fast_mode:
         description: 'Use fast mode (Claude Haiku for speed)'
         required: false
@@ -36,6 +44,8 @@ jobs:
         echo "ANTHROPIC_API_KEY=${{ secrets.CLAUDE_API_KEY }}" >> .env
         echo "DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}" >> .env
         echo "ROW_LIMIT=${{ github.event.inputs.row_limit }}" >> .env
+        echo "START_ROW=${{ github.event.inputs.start_row }}" >> .env
+        echo "END_ROW=${{ github.event.inputs.end_row }}" >> .env
         echo "USE_FAST_MODE=${{ github.event.inputs.fast_mode }}" >> .env
         echo "CLAUDE_MODEL=claude-sonnet-4-20250514" >> .env
     
