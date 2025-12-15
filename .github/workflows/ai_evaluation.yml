@@ -36,12 +36,18 @@ jobs:
       - name: Verify input files
         run: |
           echo "Checking for required files..."
-          ls -lh data/
+          echo "Current directory: $(pwd)"
+          echo "Repository contents:"
+          ls -la
+          echo ""
+          echo "Data directory contents:"
+          ls -lh data/ || { echo "❌ Error: data/ directory not found"; exit 1; }
+          echo ""
           if [ ! -f "data/khcc_eval_input.xlsx" ]; then
             echo "❌ Error: khcc_eval_input.xlsx not found in data/ directory"
             exit 1
           fi
-          echo "✓ Input file found"
+          echo "✓ Input file found: data/khcc_eval_input.xlsx"
       
       - name: Configure evaluation mode
         run: |
