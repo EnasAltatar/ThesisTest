@@ -63,8 +63,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          cd scripts
-          python ai_evaluator.py
+          python scripts/ai_evaluator.py
       
       - name: Generate summary report
         if: success()
