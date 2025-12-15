@@ -61,7 +61,7 @@ jobs:
       
       - name: Run AI evaluation
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           python scripts/ai_evaluator.py
       
