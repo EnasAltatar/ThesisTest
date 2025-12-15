@@ -65,28 +65,6 @@ jobs:
         run: |
           python scripts/ai_evaluator.py
       
-      - name: Generate summary report
-        if: success()
-        run: |
-          echo "# AI Evaluation Summary" > evaluation_summary.md
-          echo "" >> evaluation_summary.md
-          echo "**Run Date:** $(date)" >> evaluation_summary.md
-          echo "**Test Mode:** ${{ inputs.test_mode }}" >> evaluation_summary.md
-          echo "" >> evaluation_summary.md
-          
-          if [ -f "outputs/ai_evaluations_summary.csv" ]; then
-            echo "## Score Statistics" >> evaluation_summary.md
-            echo "\`\`\`" >> evaluation_summary.md
-            cat outputs/ai_evaluations_summary.csv >> evaluation_summary.md
-            echo "\`\`\`" >> evaluation_summary.md
-          fi
-          
-          if [ -f "outputs/ai_evaluations.csv" ]; then
-            TOTAL_NOTES=$(tail -n +2 outputs/ai_evaluations.csv | wc -l)
-            echo "" >> evaluation_summary.md
-            echo "**Total Notes Evaluated:** $TOTAL_NOTES" >> evaluation_summary.md
-          fi
-      
       - name: Upload evaluation results
         if: success()
         uses: actions/upload-artifact@v4
@@ -96,29 +74,17 @@ jobs:
             outputs/ai_evaluations.csv
             outputs/ai_evaluations_full.json
             outputs/ai_evaluations_summary.csv
-            evaluation_summary.md
           retention-days: 90
-      
-      - name: Commit results to repository
-        if: success() && github.event_name == 'workflow_dispatch'
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          
-          mkdir -p results/$(date +%Y%m%d)
-          cp outputs/ai_evaluations.csv results/$(date +%Y%m%d)/
-          cp outputs/ai_evaluations_full.json results/$(date +%Y%m%d)/
-          cp outputs/ai_evaluations_summary.csv results/$(date +%Y%m%d)/
-          cp evaluation_summary.md results/$(date +%Y%m%d)/
-          
-          git add results/
-          git commit -m "Add AI evaluation results - Run #${{ github.run_number }}" || echo "No changes to commit"
-          git push || echo "Nothing to push"
       
       - name: Create summary comment
         if: success()
         run: |
-          cat evaluation_summary.md >> $GITHUB_STEP_SUMMARY
+          echo "# AI Evaluation Complete! 🎉" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Run Number:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download your results from the Artifacts section below." >> $GITHUB_STEP_SUMMARY
       
       - name: Notify on failure
         if: failure()
