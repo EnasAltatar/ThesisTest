@@ -15,6 +15,16 @@ import time
 import os
 script_dir = os.path.dirname(os.path.abspath(__file__))
 pcne_path = os.path.join(script_dir, 'pcne_codes.json')
+
+# If not found in script directory, try current directory
+if not os.path.exists(pcne_path):
+    pcne_path = 'pcne_codes.json'
+
+# If still not found, try going up one level
+if not os.path.exists(pcne_path):
+    pcne_path = os.path.join(os.path.dirname(script_dir), 'scripts', 'pcne_codes.json')
+
+print(f"Loading PCNE codes from: {pcne_path}")
 with open(pcne_path, 'r') as f:
     PCNE_CODES = json.load(f)
 
