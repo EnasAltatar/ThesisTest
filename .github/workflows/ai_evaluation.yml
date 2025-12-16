@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install anthropic pandas openpyxl numpy scipy scikit-learn matplotlib seaborn
+          pip install openai pandas openpyxl numpy scipy scikit-learn matplotlib seaborn
       
       - name: Verify input files
         run: |
@@ -61,9 +61,9 @@ jobs:
       
       - name: Run AI evaluation
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python scripts/ai_evaluator.py
+          python scripts/ai_evaluator_gpt.py
       
       - name: Upload evaluation results
         if: success()
