@@ -1,0 +1,14 @@
+# Python Dependencies for AI Evaluation System - Claude Version
+# Install with: pip install -r requirements.txt
+
+# Core dependencies - Claude/Anthropic
+anthropic>=0.39.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+numpy>=1.24.0
+
+# Optional: for comparison analysis (if needed later)
+scipy>=1.10.0
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
