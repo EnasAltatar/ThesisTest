@@ -78,7 +78,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Run Number:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
           echo "**Date:** $(date)" >> $GITHUB_STEP_SUMMARY
-          echo "**Model:** Claude Haiku 4" >> $GITHUB_STEP_SUMMARY
+          echo "**Model:** Claude 3.5 Haiku" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Download your results from the Artifacts section below." >> $GITHUB_STEP_SUMMARY
       
