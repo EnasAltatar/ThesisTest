@@ -158,7 +158,7 @@ def evaluate_note_with_ai(client, patient_summary: str, note_text: str, case_id:
     
     try:
         response = client.messages.create(
-            model="claude-haiku-4-20250103",  # Cost-effective: ~$1.50 for 1000 notes
+            model="claude-3-5-haiku-20241022",  # Correct Haiku model name
             max_tokens=2000,
             temperature=0,  # Deterministic for consistency
             messages=[
@@ -183,7 +183,7 @@ def evaluate_note_with_ai(client, patient_summary: str, note_text: str, case_id:
         evaluation['case_id'] = case_id
         evaluation['note_label'] = note_label
         evaluation['evaluation_timestamp'] = datetime.now().isoformat()
-        evaluation['model_used'] = 'claude-haiku-4-20250103'
+        evaluation['model_used'] = 'claude-3-5-haiku-20241022'
         
         return evaluation
         
@@ -194,7 +194,7 @@ def evaluate_note_with_ai(client, patient_summary: str, note_text: str, case_id:
             'note_label': note_label,
             'error': str(e),
             'evaluation_timestamp': datetime.now().isoformat(),
-            'model_used': 'claude-haiku-4-20250103'
+            'model_used': 'claude-3-5-haiku-20241022'
         }
 
 def flatten_evaluation_for_csv(evaluation: Dict) -> Dict:
@@ -205,7 +205,7 @@ def flatten_evaluation_for_csv(evaluation: Dict) -> Dict:
         'case_id': evaluation.get('case_id'),
         'note_label': evaluation.get('note_label'),
         'evaluation_timestamp': evaluation.get('evaluation_timestamp'),
-        'model_used': evaluation.get('model_used', 'claude-haiku-4-20250103'),
+        'model_used': evaluation.get('model_used', 'claude-3-5-haiku-20241022'),
         'error': evaluation.get('error', '')
     }
     
@@ -280,8 +280,8 @@ def main():
     total = len(df)
     
     print(f"\nStarting evaluation of {total} notes...")
-    print(f"Model: Claude Haiku 4")
-    print(f"Estimated cost: ~${total * 0.0015:.2f}")
+    print(f"Model: Claude 3.5 Haiku")
+    print(f"Estimated cost: ~${total * 0.0008:.2f}")
     print("="*50)
     
     for idx, row in df.iterrows():
@@ -343,8 +343,8 @@ def main():
     print(f"Total notes evaluated: {len(evaluations)}")
     print(f"Successful evaluations: {sum(1 for e in evaluations if 'error' not in e)}")
     print(f"Failed evaluations: {sum(1 for e in evaluations if 'error' in e)}")
-    print(f"Model used: Claude Haiku 4")
-    print(f"Estimated cost: ~${len(evaluations) * 0.0015:.2f}")
+    print(f"Model used: Claude 3.5 Haiku")
+    print(f"Estimated cost: ~${len(evaluations) * 0.0008:.2f}")
 
 if __name__ == "__main__":
     main()
