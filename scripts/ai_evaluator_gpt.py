@@ -1,10 +1,9 @@
 """
 AI-based Evaluation System for Clinical Pharmacist Notes
-Using GPT-4o-mini for cost-effective evaluation (~$1.10 for 1000 notes)
 Evaluates notes using PCNE V9.1 classification and holistic rubric (1-5 scale)
 """
 
-import openai
+import anthropic
 import pandas as pd
 import json
 import os
@@ -84,10 +83,10 @@ Provide a comprehensive evaluation in the following JSON format:
 ```json
 {{
   "pcne_classification": {{
-    "problems": ["P1.2", "P1.3"],
-    "causes": ["C3.1", "C1.6"],
-    "interventions": ["I1.3", "I3.5"],
-    "outcomes": ["O1.1"],
+    "problems": ["P1.2", "P1.3"],  // List all applicable problem codes
+    "causes": ["C3.1", "C1.6"],     // List all applicable cause codes
+    "interventions": ["I1.3", "I3.5"], // List all applicable intervention codes
+    "outcomes": ["O1.1"],            // List all applicable outcome codes
     "drp_description": "Brief description of key drug-related problems identified"
   }},
   "holistic_scores": {{
@@ -143,7 +142,7 @@ def format_pcne_codes_for_prompt():
 
 def evaluate_note_with_ai(client, patient_summary: str, note_text: str, case_id: str, note_label: str) -> Dict:
     """
-    Evaluate a single clinical pharmacist note using GPT-4o-mini API
+    Evaluate a single clinical pharmacist note using Claude API
     """
     problems, causes, interventions, outcomes = format_pcne_codes_for_prompt()
     
@@ -157,19 +156,17 @@ def evaluate_note_with_ai(client, patient_summary: str, note_text: str, case_id:
     )
     
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # Cost-effective: ~$1.10 for 1000 notes
+        response = client.messages.create(
+            model="claude-haiku-4-20250103",  # Much cheaper: ~$1-2 for 1000 notes vs ~$25
+            max_tokens=2000,  # Reduced from 4000 - sufficient for structured evaluation
+            temperature=0,  # Use 0 for more consistent evaluations
             messages=[
-                {"role": "system", "content": "You are an expert clinical pharmacist evaluator. Respond only with valid JSON."},
                 {"role": "user", "content": prompt}
-            ],
-            temperature=0,  # Deterministic for consistency
-            max_tokens=2000,
-            response_format={"type": "json_object"}  # Ensures JSON output
+            ]
         )
         
         # Extract JSON from response
-        response_text = response.choices[0].message.content.strip()
+        response_text = response.content[0].text.strip()
         
         # Remove markdown code blocks if present
         if response_text.startswith("```json"):
@@ -185,7 +182,6 @@ def evaluate_note_with_ai(client, patient_summary: str, note_text: str, case_id:
         evaluation['case_id'] = case_id
         evaluation['note_label'] = note_label
         evaluation['evaluation_timestamp'] = datetime.now().isoformat()
-        evaluation['model_used'] = 'gpt-4o-mini'
         
         return evaluation
         
@@ -195,8 +191,7 @@ def evaluate_note_with_ai(client, patient_summary: str, note_text: str, case_id:
             'case_id': case_id,
             'note_label': note_label,
             'error': str(e),
-            'evaluation_timestamp': datetime.now().isoformat(),
-            'model_used': 'gpt-4o-mini'
+            'evaluation_timestamp': datetime.now().isoformat()
         }
 
 def flatten_evaluation_for_csv(evaluation: Dict) -> Dict:
@@ -207,7 +202,6 @@ def flatten_evaluation_for_csv(evaluation: Dict) -> Dict:
         'case_id': evaluation.get('case_id'),
         'note_label': evaluation.get('note_label'),
         'evaluation_timestamp': evaluation.get('evaluation_timestamp'),
-        'model_used': evaluation.get('model_used', 'gpt-4o-mini'),
         'error': evaluation.get('error', '')
     }
     
@@ -232,14 +226,14 @@ def flatten_evaluation_for_csv(evaluation: Dict) -> Dict:
 
 def main():
     """
-    Main evaluation pipeline using GPT-4o-mini
+    Main evaluation pipeline
     """
-    # Initialize OpenAI client
-    api_key = os.getenv('OPENAI_API_KEY')
+    # Initialize Claude client
+    api_key = os.getenv('ANTHROPIC_API_KEY')
     if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable not set")
+        raise ValueError("ANTHROPIC_API_KEY environment variable not set")
     
-    client = openai.OpenAI(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key)
     
     # Load input data
     print("Loading evaluation input data...")
@@ -267,14 +261,14 @@ def main():
     
     # Optional: Limit for testing
     TEST_MODE = True
-    SAMPLE_SIZE = None  # Set to a number for random sample (e.g., 200)
+    SAMPLE_SIZE = 200  # Set to None for all notes, or a number for random sample
     
     if TEST_MODE:
         print("\n🧪 TEST MODE: Evaluating first 5 notes only")
         df = df.head(5)
     elif SAMPLE_SIZE and SAMPLE_SIZE < len(df):
         print(f"\n📊 SAMPLE MODE: Evaluating random sample of {SAMPLE_SIZE} notes")
-        df = df.sample(n=SAMPLE_SIZE, random_state=42)
+        df = df.sample(n=SAMPLE_SIZE, random_state=42)  # random_state for reproducibility
         df = df.reset_index(drop=True)
     
     # Evaluate each note
@@ -296,7 +290,7 @@ def main():
         
         # Rate limiting: slight delay between requests
         if idx < total - 1:
-            time.sleep(0.5)  # GPT-4o-mini is fast, shorter delay needed
+            time.sleep(1)
     
     # Save results
     print("\n" + "="*50)
@@ -322,26 +316,23 @@ def main():
     print(f"✓ Flattened results saved to: {output_csv}")
     
     # Save summary statistics
-    if not df_results.empty and ('error' not in df_results.columns or df_results['error'].isna().all()):
+    if not df_results.empty and 'error' not in df_results.columns or df_results['error'].isna().all():
         score_columns = [col for col in df_results.columns if col.endswith('_score')]
-        if score_columns:
-            summary = df_results[score_columns].describe()
-            
-            output_summary = os.path.join(output_dir, 'ai_evaluations_summary.csv')
-            summary.to_csv(output_summary)
-            print(f"✓ Summary statistics saved to: {output_summary}")
-            
-            print("\n" + "="*50)
-            print("EVALUATION SUMMARY")
-            print("="*50)
-            print(summary)
+        summary = df_results[score_columns].describe()
+        
+        output_summary = os.path.join(output_dir, 'ai_evaluations_summary.csv')
+        summary.to_csv(output_summary)
+        print(f"✓ Summary statistics saved to: {output_summary}")
+        
+        print("\n" + "="*50)
+        print("EVALUATION SUMMARY")
+        print("="*50)
+        print(summary)
     
     print("\n✅ AI evaluation complete!")
     print(f"Total notes evaluated: {len(evaluations)}")
     print(f"Successful evaluations: {sum(1 for e in evaluations if 'error' not in e)}")
     print(f"Failed evaluations: {sum(1 for e in evaluations if 'error' in e)}")
-    print(f"Model used: GPT-4o-mini")
-    print(f"Estimated cost: ~${len(evaluations) * 0.0011:.2f}")
 
 if __name__ == "__main__":
     main()
