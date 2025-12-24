@@ -297,8 +297,12 @@ def main():
     print(f"Loaded {len(df)} notes to evaluate")
     
     # Optional: Limit for testing
-    TEST_MODE = True
+    TEST_MODE = False
     SAMPLE_SIZE = None  # Set to a number for random sample (e.g., 200)
+    
+    # Batch processing to avoid timeout
+    BATCH_START = 0      # Start index (0 for first batch)
+    BATCH_SIZE = 500     # Process 500 at a time (adjustable)
     
     if TEST_MODE:
         print("\n🧪 TEST MODE: Evaluating first 5 notes only")
@@ -306,6 +310,12 @@ def main():
     elif SAMPLE_SIZE and SAMPLE_SIZE < len(df):
         print(f"\n📊 SAMPLE MODE: Evaluating random sample of {SAMPLE_SIZE} notes")
         df = df.sample(n=SAMPLE_SIZE, random_state=42)
+        df = df.reset_index(drop=True)
+    elif BATCH_SIZE:
+        # Batch processing mode
+        batch_end = min(BATCH_START + BATCH_SIZE, len(df))
+        print(f"\n📦 BATCH MODE: Processing notes {BATCH_START} to {batch_end-1}")
+        df = df.iloc[BATCH_START:batch_end]
         df = df.reset_index(drop=True)
     
     # Evaluate each note
