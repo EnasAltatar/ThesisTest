@@ -301,7 +301,7 @@ def main():
     SAMPLE_SIZE = None  # Set to a number for random sample (e.g., 200)
     
     # Batch processing to avoid timeout
-    BATCH_START = 0      # Start index (0 for first batch)
+    BATCH_START = 500      # Start index (0 for first batch)
     BATCH_SIZE = 500     # Process 500 at a time (adjustable)
     
     if TEST_MODE:
