@@ -368,13 +368,13 @@ def add_complexity_to_dataset(input_file: str, output_file: str):
 if __name__ == "__main__":
     # Configuration - EDIT THESE PATHS FOR YOUR SETUP
     
-    # Option 1: If running in Claude.ai environment
-    INPUT_FILE = "/mnt/user-data/uploads/khcc_cases_200__2_.xlsx"
-    OUTPUT_FILE = "/mnt/user-data/outputs/khcc_cases_200_with_complexity.xlsx"
+    # Option 1: If running in Claude.ai environment (COMMENT OUT for GitHub)
+    # INPUT_FILE = "/mnt/user-data/uploads/khcc_cases_200__2_.xlsx"
+    # OUTPUT_FILE = "/mnt/user-data/outputs/khcc_cases_200_with_complexity.xlsx"
     
-    # Option 2: If running from GitHub (uncomment these and comment above)
-    # INPUT_FILE = "khcc_cases_200__2_.xlsx"  # Your input file
-    # OUTPUT_FILE = "khcc_cases_200_with_complexity.xlsx"  # Output file name
+    # Option 2: If running from GitHub (DEFAULT)
+    INPUT_FILE = "scripts/khcc_cases_200.xlsx"  # Your input file in scripts folder
+    OUTPUT_FILE = "scripts/khcc_cases_200_with_complexity.xlsx"  # Output file
     
     # Run the function
     enhanced_df = add_complexity_to_dataset(INPUT_FILE, OUTPUT_FILE)
